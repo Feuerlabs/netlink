@@ -7,18 +7,41 @@
 
 -module(netlink_drv).
 -export([start/0]).
+-export([connect/1, disconnect/1, refresh/1]).
+-export([activate/1, activate/2, deactivate/1]).
 
--define(NL_CONNECT,     1).
--define(NL_DISCONNECT,  2).
--define(NL_ACTIVATE,    3).
--define(NL_DEACTIVATE,  4).
--define(NL_ACTIVATE_1,  5).
+-define(NL_CMD_CONNECT,     1).
+-define(NL_CMD_DISCONNECT,  2).
+-define(NL_CMD_ACTIVATE,    3).
+-define(NL_CMD_REFRESH,     4).
+
+-define(NL_REP_OK,     0).
+-define(NL_REP_ERROR,  1).
 
 start() ->
     Port = open(),
-    erlang:port_control(Port, ?NL_CONNECT, []),
-    erlang:port_control(Port, ?NL_ACTIVATE, []),
+    connect(Port),
+    activate(Port),
+    refresh(Port),
     Port.
+
+connect(Port) ->
+    do_reply(erlang:port_control(Port, ?NL_CMD_CONNECT, [])).
+
+disconnect(Port) ->
+    do_reply(erlang:port_control(Port, ?NL_CMD_DISCONNECT, [])).    
+
+deactivate(Port) ->
+    activate(Port, 0).    
+
+activate(Port) ->
+    activate(Port, -1).
+
+activate(Port, N) when is_integer(N), N >= -1, N < 16#ffff ->
+    do_reply(erlang:port_control(Port, ?NL_CMD_ACTIVATE, <<N:16>>)).
+
+refresh(Port) ->
+    do_reply(erlang:port_control(Port, ?NL_CMD_REFRESH, [])).
 
 open() ->
     Driver = "netlink_drv",
@@ -32,5 +55,11 @@ open() ->
 	    erlang:error(Error)
     end.
 
+do_reply([?NL_REP_OK]) ->
+    ok;
+do_reply([?NL_REP_ERROR | Err]) ->
+    {error, list_to_atom(Err)}.
+
+    
 
 	

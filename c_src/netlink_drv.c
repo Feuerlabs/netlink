@@ -15,11 +15,12 @@
 #include "erl_driver.h"
 
 typedef struct {
-    ErlDrvPort      port;
-    ErlDrvEvent     event;
-    int             active; // 0=no, 1=once, -1=yes
-    struct nl_sock* sock;
-    struct nl_cache* link_cache;
+    ErlDrvPort       port;
+    ErlDrvEvent      event;
+    int              active; // -1=always, 0=no, 1=once,...
+    int           connected;
+    struct nl_sock*  sock;
+    struct nl_cache* cache;
 } drv_data_t;
 
 ErlDrvEntry nl_drv_entry;
@@ -207,9 +208,10 @@ static void link_obj_send(drv_data_t* dptr, struct rtnl_link* link)
 
     driver_output_term(dptr->port, message, i);
 
-    if (dptr->active == 1) {
-	driver_select(dptr->port, dptr->event, ERL_DRV_READ, 0);
-	dptr->active = 0;
+    if (dptr->active > 0) {
+	dptr->active--;
+	if (dptr->active == 0)
+	    driver_select(dptr->port, dptr->event, ERL_DRV_READ, 0);
     }
 }
 
@@ -277,8 +279,15 @@ static void       nl_drv_stop(ErlDrvData d)
 
     fprintf(stderr, "nl_drv_stop called!!!\r\n");
     if (dptr) {
-	if (dptr->sock)
+	if (dptr->active)
+	    driver_select(dptr->port, dptr->event, ERL_DRV_READ, 0);
+	if (dptr->sock) {
+	    nl_close(dptr->sock);
 	    nl_socket_free(dptr->sock);
+	} 
+	if (dptr->cache) {
+	    nl_cache_free(dptr->cache);
+	}
 	driver_free(dptr);
     }
 }
@@ -313,34 +322,36 @@ static void nl_drv_ready_output(ErlDrvData d, ErlDrvEvent event)
     fprintf(stderr, "nl_drv_read_output called!!!\r\n");
 }
 
-#define NL_CONNECT     1
-#define NL_DISCONNECT  2
-#define NL_ACTIVATE    3
-#define NL_DEACTIVATE  4
-#define NL_ACTIVATE_1  5
+#define NL_CMD_CONNECT     1
+#define NL_CMD_DISCONNECT  2
+#define NL_CMD_ACTIVATE    3
+#define NL_CMD_REFRESH     4
 
-#define NL_OK     0
-#define NL_ERROR  1
-#define NL_ERRNO  2
+#define NL_REP_OK     0
+#define NL_REP_ERROR  1
 
 static int nl_drv_ctl(ErlDrvData d,unsigned int cmd,char* buf,
 		      int len,char** rbuf,int rlen)
 {
     drv_data_t* dptr = (drv_data_t*) d;
     char* rdata = *rbuf;
-    (void) buf;
-    (void) len;
-    (void) rbuf;
-    int err;
+    char* err_str;
+    int err_str_len;
+    int err = 0;
 
     fprintf(stderr, "nl_drv_ctl called!!!\r\n");
 
     switch(cmd) {
-    case NL_CONNECT: {
+    case NL_CMD_CONNECT: {
 	int fd;
 
+	if ((len != 0) || (dptr->connected))
+	    goto L_einval;
+
+	// FIXME: check if already connected, + connect more targets!
 	nl_cli_connect(dptr->sock, NETLINK_ROUTE);
-  
+	dptr->connected = 1;
+
 	if ((err = nl_socket_add_membership(dptr->sock, RTNLGRP_LINK)) < 0) {
 	    err = 0;
 	    fprintf(stderr, "nl_socket_add_membership: error: %s\n", 
@@ -348,74 +359,85 @@ static int nl_drv_ctl(ErlDrvData d,unsigned int cmd,char* buf,
 	    goto L_error;
 	}
 
-	if (!(dptr->link_cache = nl_cli_link_alloc_cache(dptr->sock))) {
+	if (!(dptr->cache = nl_cli_link_alloc_cache(dptr->sock))) {
 	    err = errno;
 	    fprintf(stderr, "unable to allocate nl_cli_link_cache\r\n");
-	    goto L_err;
+	    goto L_error;
 	}
 
 	if ((fd = nl_socket_get_fd(dptr->sock)) >= 0)
 	    dptr->event = (ErlDrvEvent)((long)fd);
 	else {
 	    err = errno;
-	    goto L_err;
+	    goto L_error;
 	}
 	dptr->active = 0;
-	
-
-	// Loop at startup to get interface states updated!
-	{
-	    struct nl_object* obj = nl_cache_get_first(dptr->link_cache);
-	    if (obj) {
-		do {
-		    link_obj_send(dptr, (struct rtnl_link*) obj);
-		    obj = nl_cache_get_next(obj);
-		} while(obj);
-	    }
-	}
-	
 	break;
     }
 
-    case NL_DISCONNECT:
+    case NL_CMD_DISCONNECT:
+	if ((len != 0) || !(dptr->connected))
+	    goto L_einval;
 	// FIXME:
-	driver_select(dptr->port, dptr->event, ERL_DRV_READ, 0);	
+	driver_select(dptr->port, dptr->event, ERL_DRV_READ, 0);
+	dptr->active = 0;	
+	dptr->connected = 0;
 	break;
 
-    case NL_ACTIVATE:  // start sending events
-	if (!dptr->active)
-	    driver_select(dptr->port, dptr->event, ERL_DRV_READ, 1);
-	dptr->active = -1;  // always
+    case NL_CMD_REFRESH: {
+	if ((len != 0) || !(dptr->connected))
+	    goto L_einval;
+	// Loop at startup to get interface states updated!
+	struct nl_object* obj = nl_cache_get_first(dptr->cache);
+	if (obj) {
+	    do {
+		link_obj_send(dptr, (struct rtnl_link*) obj);
+		obj = nl_cache_get_next(obj);
+	    } while(obj);
+	}
 	break;
+    }
 
-    case NL_DEACTIVATE: // stop sending events
-	if (dptr->active)
-	    driver_select(dptr->port, dptr->event, ERL_DRV_READ, 0);
-	dptr->active = 0;
-	break;
 
-    case NL_ACTIVATE_1:  // send one event
-	if (!dptr->active)
-	    driver_select(dptr->port, dptr->event, ERL_DRV_READ, 1);
-	dptr->active = 1;  // active one event
+    case NL_CMD_ACTIVATE: {  // start/stop sending events
+	int active;
+
+	if ((len != 2) || !(dptr->connected))
+	    goto L_einval;
+	active = (((uint8_t*)buf)[0] << 8) | ((uint8_t*)buf)[1];
+	if (active == 0xffff)
+	    active = -1;
+	if (active) {
+	    if (!dptr->active)
+		driver_select(dptr->port, dptr->event, ERL_DRV_READ, 1);
+	    dptr->active = active;
+	}
+	else {
+	    if (dptr->active)
+		driver_select(dptr->port, dptr->event, ERL_DRV_READ, 0);
+	    dptr->active = 0;
+	}
 	break;
+    }
 
     default:
 	return -1;
     }
 
 // L_ok:
-    rdata[0] = NL_OK;
+    rdata[0] = NL_REP_OK;
     return 1;
 
-L_err:
-    rdata[1] = NL_ERRNO;
-    rdata[2] = err;
-    return 2;
+L_einval:
+    err = EINVAL;
 L_error:
-    rdata[1] = NL_ERROR;
-    rdata[2] = err;
-    return 2;
+    rdata[0] = NL_REP_ERROR;
+    err_str = strerror(err);
+    err_str_len = strlen(err_str);
+    if (err_str_len > 255) err_str_len = 255;
+    if (err_str_len >= rlen) err_str_len = rlen - 1;
+    memcpy(&rdata[1], err_str, err_str_len);
+    return err_str_len;
 }
 
 static void       nl_drv_timeout(ErlDrvData d)
@@ -444,7 +466,10 @@ static ErlDrvData nl_drv_start(ErlDrvPort port, char* command)
 	errno = err;
 	return ERL_DRV_ERROR_ERRNO;
     }
+
+    // needed to be able to probe for any kind of netlink messages
     nl_socket_disable_seq_check(dptr->sock);
+
     nl_socket_modify_cb(dptr->sock, NL_CB_VALID, NL_CB_CUSTOM,
 			link_event_input, dptr);
     return (ErlDrvData) dptr;
