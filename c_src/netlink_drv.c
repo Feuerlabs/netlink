@@ -14,6 +14,12 @@
 
 #include "erl_driver.h"
 
+// Hack to handle R15 driver used with pre R15 driver
+#if ERL_DRV_EXTENDED_MAJOR_VERSION == 1
+typedef int  ErlDrvSizeT;
+typedef int  ErlDrvSSizeT;
+#endif
+
 typedef struct {
     ErlDrvPort       port;
     ErlDrvEvent      event;
@@ -62,12 +68,12 @@ ErlDrvTermData atm_echo;
 static int        nl_drv_init(void);
 static void       nl_drv_finish(void);
 static void       nl_drv_stop(ErlDrvData);
-static void       nl_drv_output(ErlDrvData, char*, int);
+static void       nl_drv_output(ErlDrvData,char*,ErlDrvSizeT);
 static void       nl_drv_outputv(ErlDrvData, ErlIOVec*);
 static void       nl_drv_ready_input(ErlDrvData, ErlDrvEvent);
 static void       nl_drv_ready_output(ErlDrvData data, ErlDrvEvent event);
 static ErlDrvData nl_drv_start(ErlDrvPort, char* command);
-static int        nl_drv_ctl(ErlDrvData,unsigned int,char*, int,char**,int);
+static ErlDrvSSizeT nl_drv_ctl(ErlDrvData,unsigned int,char*,ErlDrvSizeT,char**,ErlDrvSizeT);
 static void       nl_drv_timeout(ErlDrvData);
 
 //
@@ -292,7 +298,7 @@ static void       nl_drv_stop(ErlDrvData d)
     }
 }
 
-static void       nl_drv_output(ErlDrvData d, char* buf, int len)
+static void       nl_drv_output(ErlDrvData d, char* buf,ErlDrvSizeT len)
 {
     (void) d;
     (void) buf;
@@ -330,8 +336,8 @@ static void nl_drv_ready_output(ErlDrvData d, ErlDrvEvent event)
 #define NL_REP_OK     0
 #define NL_REP_ERROR  1
 
-static int nl_drv_ctl(ErlDrvData d,unsigned int cmd,char* buf,
-		      int len,char** rbuf,int rlen)
+static ErlDrvSSizeT nl_drv_ctl(ErlDrvData d,unsigned int cmd,char* buf,
+			       ErlDrvSizeT len,char** rbuf,ErlDrvSizeT rlen)
 {
     drv_data_t* dptr = (drv_data_t*) d;
     char* rdata = *rbuf;
