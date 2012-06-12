@@ -42,6 +42,7 @@ ErlDrvTermData atm_if_state;
 ErlDrvTermData atm_if_lower_state;
 ErlDrvTermData atm_oper_status;
 ErlDrvTermData atm_link_mode;
+ErlDrvTermData atm_addr;
 
 ErlDrvTermData atm_up;
 ErlDrvTermData atm_down;
@@ -90,28 +91,31 @@ static void link_obj_send(drv_data_t* dptr, struct rtnl_link* link)
     char bf1[1024];
     char bf2[1024];
     char link_name[1024];
-    int i;
     ErlDrvTermData message[1024];
+    int mix = 0;
+    struct nl_addr *addr;
+    int elems = 0;
 
 #define push_atm(atm) do {			\
-	message[i++] = ERL_DRV_ATOM;		\
-	message[i++] = (atm);			\
+	message[mix++] = ERL_DRV_ATOM;		\
+	message[mix++] = (atm);			\
     } while(0)
 
 #define push_str(str) do {			\
-	message[i++] = ERL_DRV_STRING;		\
-	message[i++] = (ErlDrvTermData) (str);	\
-	message[i++] = strlen(str);		\
+	message[mix++] = ERL_DRV_STRING;		\
+	message[mix++] = (ErlDrvTermData) (str);	\
+	message[mix++] = strlen(str);		\
     } while(0)
 
 #define push_int(val) do {			\
-	message[i++] = ERL_DRV_INT;		\
-	message[i++] = (val);			\
+	message[mix++] = ERL_DRV_INT;		\
+	message[mix++] = (val);			\
     } while(0)
 
-
-
-    i = 0;
+#define push_tuple(n) do {			\
+	message[mix++] = ERL_DRV_TUPLE;		\
+	message[mix++] = (n);			\
+    } while(0)
 
     // {netlink, List}
     push_atm(atm_netlink);
@@ -120,34 +124,30 @@ static void link_obj_send(drv_data_t* dptr, struct rtnl_link* link)
     strcpy(link_name, rtnl_link_get_name(link));
     push_atm(atm_name);
     push_str(link_name);
-    message[i++] = ERL_DRV_TUPLE;
-    message[i++] = 2;
+    push_tuple(2);
+    elems++;
 
-    // debug
-    fprintf(stderr, "sending link event for link: %s\r\n", link_name);    
-	
     // 2- {index,Index}
     push_atm(atm_index);
     push_int(rtnl_link_get_ifindex(link));
-    message[i++] = ERL_DRV_TUPLE;
-    message[i++] = 2;
+    push_tuple(2);
+    elems++;
 
     // 3 - {mtu,Mtu}
     push_atm(atm_mtu);
     push_int(rtnl_link_get_mtu(link));
-    message[i++] = ERL_DRV_TUPLE;
-    message[i++] = 2;
+    push_tuple(2);
+    elems++;
 
     // 4 - {txqlen,Len}
     push_atm(atm_txqlen);
     push_int(rtnl_link_get_txqlen(link));
-    message[i++] = ERL_DRV_TUPLE;
-    message[i++] = 2;
-
-    flags = rtnl_link_get_flags(link);
-    num_flags = 0;
+    push_tuple(2);
+    elems++;
 
     // 5 - {flags,[Flag1,Flag2,...]}
+    flags = rtnl_link_get_flags(link);
+    num_flags = 0;
     push_atm(atm_flags);
 
     if (flags & IFF_UP) { push_atm(atm_up); num_flags++; }
@@ -170,49 +170,63 @@ static void link_obj_send(drv_data_t* dptr, struct rtnl_link* link)
     if (flags & IFF_LOWER_UP) { push_atm(atm_lower_up); num_flags++; }
     if (flags & IFF_DORMANT) { push_atm(atm_dormant); num_flags++; }
     if (flags & IFF_ECHO) { push_atm(atm_echo); num_flags++; }
-    message[i++] = ERL_DRV_NIL;
-    message[i++] = ERL_DRV_LIST;
-    message[i++] = num_flags+1;
-    message[i++] = ERL_DRV_TUPLE;
-    message[i++] = 2;
+    message[mix++] = ERL_DRV_NIL;
+    message[mix++] = ERL_DRV_LIST;
+    message[mix++] = num_flags+1;
+    push_tuple(2);
+    elems++;
 
     // 6 - {if_state, up|down}
     push_atm(atm_if_state);
     push_atm((flags & IFF_UP) ? atm_up : atm_down);
-    message[i++] = ERL_DRV_TUPLE;
-    message[i++] = 2;
+    push_tuple(2);
+    elems++;
 
     // 7 - {if_lower_state, up|down}
     push_atm(atm_if_lower_state);
     push_atm((flags & IFF_RUNNING) ? atm_up : atm_down);
-    message[i++] = ERL_DRV_TUPLE;
-    message[i++] = 2;
+    push_tuple(2);
+    elems++;
 
     // 8 - {oper_status, Status}
     push_atm(atm_oper_status);
     state = rtnl_link_get_operstate(link);
     rtnl_link_operstate2str(state,bf1,sizeof(bf1));
     push_str(bf1);
-    message[i++] = ERL_DRV_TUPLE;
-    message[i++] = 2;
+    push_tuple(2);
+    elems++;
 
     // 9 - {link_mode, Mode}
     push_atm(atm_link_mode);
     mode = rtnl_link_get_linkmode(link);
     rtnl_link_mode2str(mode,bf2,sizeof(bf2));
     push_str(bf2);
-    message[i++] = ERL_DRV_TUPLE;
-    message[i++] = 2;
+    push_tuple(2);
+    elems++;
 
-    message[i++] = ERL_DRV_NIL;   // end of prop list
+    // (optional) 10 - {addr,{1,2,3,4,5,6}}
+    if ((addr = rtnl_link_get_addr(link)) != NULL) {
+	unsigned char* ptr = nl_addr_get_binary_addr(addr);
+	unsigned int len = nl_addr_get_len(addr);
+	int j;
 
-    message[i++] = ERL_DRV_LIST;
-    message[i++] = 10;   // 9 element list & nil
+	push_atm(atm_addr);
+	for (j = 0; j < len; j++) {
+	    push_int(ptr[j]);
+	}
+	push_tuple(len);
+	push_tuple(2);
+	elems++;
+    }
 
-    message[i++] = ERL_DRV_TUPLE;
-    message[i++] = 2;
+    message[mix++] = ERL_DRV_NIL;   // end of prop list
+    message[mix++] = ERL_DRV_LIST;
+    message[mix++] = elems+1;   // element list & nil
 
-    driver_output_term(dptr->port, message, i);
+    message[mix++] = ERL_DRV_TUPLE;
+    message[mix++] = 2;
+
+    driver_output_term(dptr->port, message, mix);
 
     if (dptr->active > 0) {
 	dptr->active--;
@@ -249,7 +263,7 @@ static int nl_drv_init(void)
     atm_if_lower_state = driver_mk_atom("if_lower_state");
     atm_oper_status = driver_mk_atom("oper_status");
     atm_link_mode = driver_mk_atom("link_mode");
-
+    atm_addr = driver_mk_atom("addr");
 
     atm_up = driver_mk_atom("up");
     atm_down = driver_mk_atom("down");

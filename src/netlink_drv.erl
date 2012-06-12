@@ -6,9 +6,12 @@
 %%% Created : 30 Nov 2011 by Tony Rogvall <tony@rogvall.se>
 
 -module(netlink_drv).
--export([start/0]).
+-export([open/0]).
 -export([connect/1, disconnect/1, refresh/1]).
 -export([activate/1, activate/2, deactivate/1]).
+
+%% short cut - deugging
+-export([start/0]).
 
 -define(NL_CMD_CONNECT,     1).
 -define(NL_CMD_DISCONNECT,  2).
