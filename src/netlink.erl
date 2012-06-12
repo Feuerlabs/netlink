@@ -32,7 +32,11 @@
 	  if_lower_state,
 	  oper_status,
 	  link_mode,
-	  addr
+	  qdisc,
+	  addr,   %% link address
+	  bcast,  %% link broadcast
+	  inet,   %% ipv4 address(es)
+	  inet6   %% ipv6 address(es)
 	}).
 
 -record(state, 
@@ -110,10 +114,8 @@ handle_call({list,Match}, _From, State) ->
       fun(I) ->
 	      case match(I, Match) of
 		  true ->
-		      io:format("~s { name ~s; index ~w; mtu ~w; txtqlen ~w; "
-				"flags ~w; if_state ~w; if_lower_state ~w; "
-				"oper_status ~p; link_mode ~p; addr ~p; }\n",
-				tuple_to_list(I));
+		      Bytes = format(I),
+		      io:format("interface { ~s }\n", [Bytes]);
 		  false ->
 		      ok
 	      end
@@ -221,6 +223,14 @@ if_update(I, [Kv | Kvs]) ->
 	    if_update(?UPDATE(I,link_mode,V), Kvs);
 	{addr,V} ->
 	    if_update(?UPDATE(I,addr,V), Kvs);
+	{bcast,V} ->
+	    if_update(?UPDATE(I,bcast,V), Kvs);
+	{qdisc,V} ->
+	    if_update(?UPDATE(I,qdisc,V), Kvs);
+	{inet,V={addr,_}} ->
+	    if_update(?UPDATE(I,inet,[V]), Kvs);
+	{inet6,V={addr,_}} ->
+	    if_update(?UPDATE(I,inet6,[V]), Kvs);
 	_ -> 
 	    io:format("unknown interface option: ~p\n", [Kv]),
 	    if_update(I, Kvs)
@@ -279,7 +289,43 @@ v_get(I, if_state) -> I#interface.if_state;
 v_get(I, if_lower_state) -> I#interface.if_lower_state;
 v_get(I, oper_status) -> I#interface.oper_status;
 v_get(I, link_mode) -> I#interface.link_mode;
-v_get(I, addr) -> I#interface.addr.
+v_get(I, addr) -> I#interface.addr;
+v_get(I, bcast) -> I#interface.bcast;
+v_get(I, qdisc) -> I#interface.qdisc;
+v_get(I, inet) -> I#interface.inet;
+v_get(I, inet6) -> I#interface.inet6.
+
+format(I) ->
+    [["name ", v_format(I, name), ";"],
+     ["mtu ", v_format(I, mtu), ";"],
+     ["txqlen ", v_format(I, txqlen), ";"],
+     ["flags ", v_format(I, flags), ";"],
+     ["if_state ", v_format(I, if_state), ";"],
+     ["if_lower_state ", v_format(I, if_lower_state), ";"],
+     ["oper_status ", v_format(I, if_state), ";"],
+     ["link_mode ", v_format(I, link_mode), ";"],
+     ["qdisc ", v_format(I, qdisc), ";"],
+     ["addr ", v_format(I, addr), ";"],
+     ["bcast ", v_format(I, bcast), ";"],
+     ["inet ", v_format(I, inet), ";"],
+     ["inet6 ", v_format(I, inet6), ";"]
+    ].
+
+v_format(I, name) -> io_lib:format("~s", [I#interface.name]);
+v_format(I, index) -> io_lib:format("~w", [I#interface.index]);
+v_format(I, mtu) -> io_lib:format("~w", [I#interface.mtu]);
+v_format(I, txqlen) -> io_lib:format("~w", [I#interface.txqlen]);
+v_format(I, flags) -> io_lib:format("~w", [I#interface.flags]);
+v_format(I, if_state) -> io_lib:format("~p", [I#interface.if_state]);
+v_format(I, if_lower_state) -> io_lib:format("~p",[I#interface.if_lower_state]);
+v_format(I, oper_status) -> io_lib:format("~p", [I#interface.oper_status]);
+v_format(I, link_mode) -> io_lib:format("~p", [I#interface.link_mode]);
+v_format(I, qdisc) -> io_lib:format("~p", [I#interface.qdisc]);
+v_format(I, addr) -> io_lib:format("~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:", tuple_to_list(I#interface.addr));
+v_format(I, bcast) -> io_lib:format("~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:", tuple_to_list(I#interface.bcast));
+v_format(I, inet) ->  io_lib:format("~p\n", [I#interface.inet]);
+v_format(I, inet6) ->  io_lib:format("~p\n", [I#interface.inet6]).
+
 
 compare('==',A,B) -> A == B;
 compare('=:=',A,B) -> A =:= B;
