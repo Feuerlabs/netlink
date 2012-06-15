@@ -14,6 +14,7 @@
 #include <linux/if.h>
 
 #include "erl_driver.h"
+#include "dterm.h"
 
 // Hack to handle R15 driver used with pre R15 driver
 #if ERL_DRV_EXTENDED_MAJOR_VERSION == 1
@@ -23,6 +24,7 @@ typedef int  ErlDrvSSizeT;
 
 typedef struct {
     ErlDrvPort       port;
+    ErlDrvTermData   dport;
     ErlDrvEvent      event;
     int              active; // -1=always, 0=no, 1=once,...
     int           connected;
@@ -37,6 +39,7 @@ ErlDrvTermData atm_netlink;
 
 ErlDrvTermData atm_name;
 ErlDrvTermData atm_index;
+ErlDrvTermData atm_label;
 ErlDrvTermData atm_mtu;
 ErlDrvTermData atm_txqlen;
 ErlDrvTermData atm_flags;
@@ -46,7 +49,9 @@ ErlDrvTermData atm_oper_status;
 ErlDrvTermData atm_link_mode;
 ErlDrvTermData atm_addr;
 ErlDrvTermData atm_bcast;
-ErlDrvTermData atm_mask;
+ErlDrvTermData atm_peer;
+ErlDrvTermData atm_mcast;
+ErlDrvTermData atm_prefixlen;
 ErlDrvTermData atm_qdisc;
 ErlDrvTermData atm_inet;
 ErlDrvTermData atm_inet6;
@@ -71,8 +76,7 @@ ErlDrvTermData atm_dynamic;
 ErlDrvTermData atm_lower_up;
 ErlDrvTermData atm_dormant;
 ErlDrvTermData atm_echo;
-
-
+ErlDrvTermData atm_undefined;
 static int        nl_drv_init(void);
 static void       nl_drv_finish(void);
 static void       nl_drv_stop(ErlDrvData);
@@ -84,239 +88,309 @@ static ErlDrvData nl_drv_start(ErlDrvPort, char* command);
 static ErlDrvSSizeT nl_drv_ctl(ErlDrvData,unsigned int,char*,ErlDrvSizeT,char**,ErlDrvSizeT);
 static void       nl_drv_timeout(ErlDrvData);
 
+// {<tag>, address}
+int dterm_address(dterm_t* p, ErlDrvTermData tag,int family,
+		  unsigned char* ptr, size_t len)
+{
+    dterm_mark_t prop;
+    dterm_mark_t addr;
+
+    dterm_tuple_begin(p, &prop); {
+	dterm_atom(p,tag);
+
+	switch(family) {
+	case AF_INET6:
+	    dterm_tuple_begin(p, &addr); {
+		int i;
+		for (i = 0; i < len; i += 2)
+		    dterm_int(p,(ptr[i] << 8) + (ptr[i+1]));
+	    }
+	    dterm_tuple_end(p, &addr);
+	    break;
+	case AF_INET:
+	case AF_UNSPEC:
+	    dterm_tuple_begin(p, &addr); {
+		int i;
+		for (i = 0; i < len; i++)
+		    dterm_int(p,ptr[i]);
+	    }
+	    dterm_tuple_end(p, &addr);
+	    break;
+	default:
+	    dterm_atom(p, atm_undefined);
+	    break;
+	}
+    }
+    return dterm_tuple_end(p, &prop);
+}
+
+int dterm_nl_addr(dterm_t* p, ErlDrvTermData tag, int family, 
+		  struct nl_addr* naddr)
+{
+    if (naddr == NULL)
+	return 0;
+    if ((family == AF_INET) || (family == AF_INET6)) {
+	dterm_mark_t prop;
+    
+	dterm_tuple_begin(p, &prop); {
+	    // {<fam>, {<tag>, Address}}
+	    dterm_atom(p,(family == AF_INET6)?atm_inet6:atm_inet);
+	    dterm_address(p, tag, family,
+			  nl_addr_get_binary_addr(naddr),
+			  nl_addr_get_len(naddr));
+	}
+	dterm_tuple_end(p, &prop);
+	return 1;
+    }
+    return 0;
+}
+
+
 //
 // send event to erlang: 
-//   {netlink,[{name,Name},{index,I},{mtu,M}...]}
+//   {netlink,<port>,"route/link",[{name,Name},{index,I},{mtu,M}...
 //
 
 static void link_obj_send(drv_data_t* dptr, struct rtnl_link* link)
 {
     uint8_t state;
     uint8_t mode;
-    unsigned int flags;
-    int num_flags;
     char bf1[1024];
     char bf2[1024];
     char link_name[1024];
     char qdisc_name[1024];
-    ErlDrvTermData message[1024];
-    int mix = 0;
+    dterm_t m;
     int if_index;
+    unsigned int flags = 0;
     char* str;
     struct nl_addr *addr;
-    int elems = 0;
+    dterm_mark_t msg;
+    dterm_mark_t prop;
+    dterm_mark_t prop_list;
 
-#define push_atm(atm) do {			\
-	message[mix++] = ERL_DRV_ATOM;		\
-	message[mix++] = (atm);			\
-    } while(0)
+    dterm_init(&m);
 
-#define push_str(str) do {			\
-	message[mix++] = ERL_DRV_STRING;		\
-	message[mix++] = (ErlDrvTermData) (str);	\
-	message[mix++] = strlen(str);		\
-    } while(0)
+    // msg = {netlink,<port>,"route/link",<prop_list>}
+    dterm_tuple_begin(&m, &msg);
+    dterm_atom(&m,atm_netlink);
+    dterm_port(&m, dptr->dport);
+    dterm_string(&m,"route/link",10);
 
-#define push_int(val) do {			\
-	message[mix++] = ERL_DRV_INT;		\
-	message[mix++] = (val);			\
-    } while(0)
+    dterm_list_begin(&m, &prop_list);
 
-#define push_tuple(n) do {			\
-	message[mix++] = ERL_DRV_TUPLE;		\
-	message[mix++] = (n);			\
-    } while(0)
+    dterm_tuple_begin(&m, &prop); {
+	// {name, Name}
+	strcpy(link_name, rtnl_link_get_name(link));
+	dterm_atom(&m,atm_name);
+	dterm_string(&m,link_name,strlen(link_name));
+    }
+    dterm_tuple_end(&m, &prop);
 
-#define push_nil() do {				\
-	message[mix++] = ERL_DRV_NIL;		\
-    } while(0)
+    dterm_tuple_begin(&m, &prop); {
+	// {index,Index}
+	if_index = rtnl_link_get_ifindex(link);
+	dterm_atom(&m,atm_index);
+	dterm_int(&m,if_index);
+    }
+    dterm_tuple_end(&m, &prop);
 
-#define push_list(n) do {			\
-	message[mix++] = ERL_DRV_LIST;		\
-	message[mix++] = (n);			\
-    } while(0)
 
-    // {netlink, List}
-    push_atm(atm_netlink);
+    dterm_tuple_begin(&m, &prop); {
+	// {mtu,Mtu}
+	dterm_atom(&m,atm_mtu);
+	dterm_int(&m,rtnl_link_get_mtu(link));
+    }
+    dterm_tuple_end(&m, &prop);
 
-    // {name, Name}
-    strcpy(link_name, rtnl_link_get_name(link));
-    push_atm(atm_name);
-    push_str(link_name);
-    push_tuple(2);
-    elems++;
-
-    // {index,Index}
-    if_index = rtnl_link_get_ifindex(link);
-    push_atm(atm_index);
-    push_int(if_index);
-    push_tuple(2);
-    elems++;
-
-    // {mtu,Mtu}
-    push_atm(atm_mtu);
-    push_int(rtnl_link_get_mtu(link));
-    push_tuple(2);
-    elems++;
-
-    // {txqlen,Len}
-    push_atm(atm_txqlen);
-    push_int(rtnl_link_get_txqlen(link));
-    push_tuple(2);
-    elems++;
+    dterm_tuple_begin(&m, &prop); {
+	// {txqlen,Len}
+	dterm_atom(&m,atm_txqlen);
+	dterm_int(&m,rtnl_link_get_txqlen(link));
+    }
+    dterm_tuple_end(&m, &prop);
 
     // {flags,[Flag1,Flag2,...]}
-    flags = rtnl_link_get_flags(link);
-    num_flags = 0;
-    push_atm(atm_flags);
+    dterm_tuple_begin(&m, &prop); {
+	dterm_mark_t flag_list;
+	flags = rtnl_link_get_flags(link);
 
-    if (flags & IFF_UP) { push_atm(atm_up); num_flags++; }
-    if (flags & IFF_BROADCAST) { push_atm(atm_broadcast); num_flags++; }
-    if (flags & IFF_DEBUG) { push_atm(atm_debug); num_flags++; }
-    if (flags & IFF_LOOPBACK) { push_atm(atm_loopback); num_flags++; }
+	dterm_atom(&m,atm_flags);
+	dterm_list_begin(&m, &flag_list);
+	if (flags & IFF_UP) { dterm_atom(&m,atm_up); }
+	if (flags & IFF_BROADCAST) { dterm_atom(&m,atm_broadcast); }
+	if (flags & IFF_DEBUG) { dterm_atom(&m,atm_debug); }
+	if (flags & IFF_LOOPBACK) { dterm_atom(&m,atm_loopback); }
+	
+	if (flags & IFF_POINTOPOINT) { dterm_atom(&m,atm_pointopoint); }
+	if (flags & IFF_NOTRAILERS) { dterm_atom(&m,atm_notrailers);  }
+	if (flags & IFF_RUNNING) { dterm_atom(&m,atm_running);  }
+	if (flags & IFF_NOARP) { dterm_atom(&m,atm_noarp);  }
+	if (flags & IFF_PROMISC) { dterm_atom(&m,atm_promisc); }
+	if (flags & IFF_ALLMULTI) { dterm_atom(&m,atm_allmulti); }
+	if (flags & IFF_MASTER) { dterm_atom(&m,atm_master); }
+	if (flags & IFF_SLAVE) { dterm_atom(&m,atm_slave); }
+	if (flags & IFF_MULTICAST) { dterm_atom(&m,atm_multicast); }
+	if (flags & IFF_PORTSEL) { dterm_atom(&m,atm_portsel); }
+	if (flags & IFF_AUTOMEDIA) { dterm_atom(&m,atm_automedia); }
+	if (flags & IFF_DYNAMIC) { dterm_atom(&m,atm_dynamic); }
+	if (flags & IFF_LOWER_UP) { dterm_atom(&m,atm_lower_up); }
+	if (flags & IFF_DORMANT) { dterm_atom(&m,atm_dormant); }
+	if (flags & IFF_ECHO) { dterm_atom(&m,atm_echo); }
+	dterm_list_end(&m, &flag_list);
+    }
+    dterm_tuple_end(&m, &prop);
 
-    if (flags & IFF_POINTOPOINT) { push_atm(atm_pointopoint); num_flags++; }
-    if (flags & IFF_NOTRAILERS) { push_atm(atm_notrailers); num_flags++; }
-    if (flags & IFF_RUNNING) { push_atm(atm_running); num_flags++; }
-    if (flags & IFF_NOARP) { push_atm(atm_noarp); num_flags++; }
-    if (flags & IFF_PROMISC) { push_atm(atm_promisc); num_flags++; }
-    if (flags & IFF_ALLMULTI) { push_atm(atm_allmulti); num_flags++; }
-    if (flags & IFF_MASTER) { push_atm(atm_master); num_flags++; }
-    if (flags & IFF_SLAVE) { push_atm(atm_slave); num_flags++; }
-    if (flags & IFF_MULTICAST) { push_atm(atm_multicast); num_flags++; }
-    if (flags & IFF_PORTSEL) { push_atm(atm_portsel); num_flags++; }
-    if (flags & IFF_AUTOMEDIA) { push_atm(atm_automedia); num_flags++; }
-    if (flags & IFF_DYNAMIC) { push_atm(atm_dynamic); num_flags++; }
-    if (flags & IFF_LOWER_UP) { push_atm(atm_lower_up); num_flags++; }
-    if (flags & IFF_DORMANT) { push_atm(atm_dormant); num_flags++; }
-    if (flags & IFF_ECHO) { push_atm(atm_echo); num_flags++; }
-    message[mix++] = ERL_DRV_NIL;
-    message[mix++] = ERL_DRV_LIST;
-    message[mix++] = num_flags+1;
-    push_tuple(2);
-    elems++;
+    dterm_tuple_begin(&m, &prop); {
+	// {if_state, up|down}
+	dterm_atom(&m,atm_if_state);
+	dterm_atom(&m,(flags & IFF_UP) ? atm_up : atm_down);
+    }
+    dterm_tuple_end(&m, &prop);
 
-    // {if_state, up|down}
-    push_atm(atm_if_state);
-    push_atm((flags & IFF_UP) ? atm_up : atm_down);
-    push_tuple(2);
-    elems++;
+    dterm_tuple_begin(&m, &prop); {
+	// {if_lower_state, up|down}
+	dterm_atom(&m,atm_if_lower_state);
+	dterm_atom(&m,(flags & IFF_RUNNING) ? atm_up : atm_down);
+    }
+    dterm_tuple_end(&m, &prop);
 
-    // {if_lower_state, up|down}
-    push_atm(atm_if_lower_state);
-    push_atm((flags & IFF_RUNNING) ? atm_up : atm_down);
-    push_tuple(2);
-    elems++;
+    dterm_tuple_begin(&m, &prop); {
+	// {oper_status, Status}
+	dterm_atom(&m,atm_oper_status);
+	state = rtnl_link_get_operstate(link);
+	rtnl_link_operstate2str(state,bf1,sizeof(bf1));
+	dterm_string(&m,bf1,strlen(bf1));
+    }
+    dterm_tuple_end(&m, &prop);
 
-    // {oper_status, Status}
-    push_atm(atm_oper_status);
-    state = rtnl_link_get_operstate(link);
-    rtnl_link_operstate2str(state,bf1,sizeof(bf1));
-    push_str(bf1);
-    push_tuple(2);
-    elems++;
+    dterm_tuple_begin(&m, &prop); {
+	// {link_mode, Mode}
+	dterm_atom(&m,atm_link_mode);
+	mode = rtnl_link_get_linkmode(link);
+	rtnl_link_mode2str(mode,bf2,sizeof(bf2));
+	dterm_string(&m,bf2,strlen(bf2));
+    }
+    dterm_tuple_end(&m, &prop);
 
-    // {link_mode, Mode}
-    push_atm(atm_link_mode);
-    mode = rtnl_link_get_linkmode(link);
-    rtnl_link_mode2str(mode,bf2,sizeof(bf2));
-    push_str(bf2);
-    push_tuple(2);
-    elems++;
-
-    // {addr,{1,2,3,4,5,6}} (optional)
+    // {addr,{1,2,3,4,5,6}} (optional, not defined for ppp)
     if ((addr = rtnl_link_get_addr(link)) != NULL) {
-	unsigned char* ptr = nl_addr_get_binary_addr(addr);
-	unsigned int len = nl_addr_get_len(addr);
-	int j;
-
-	push_atm(atm_addr);
-	for (j = 0; j < len; j++) {
-	    push_int(ptr[j]);
-	}
-	push_tuple(len);
-	push_tuple(2);
-	elems++;
+	dterm_address(&m, atm_addr, 0,
+		      nl_addr_get_binary_addr(addr), 
+		      nl_addr_get_len(addr));
     }
 
-    // {bcast,{1,2,3,4,5,6}} (optional)
+    // {bcast,{1,2,3,4,5,6}} (optional, not defined for ppp)
     if ((addr = rtnl_link_get_broadcast(link)) != NULL) {
-	unsigned char* ptr = nl_addr_get_binary_addr(addr);
-	unsigned int len = nl_addr_get_len(addr);
-	int j;
-
-	push_atm(atm_bcast);
-	for (j = 0; j < len; j++) {
-	    push_int(ptr[j]);
-	}
-	push_tuple(len);
-	push_tuple(2);
-	elems++;
+	dterm_address(&m,atm_bcast,0,
+		      nl_addr_get_binary_addr(addr),
+		      nl_addr_get_len(addr));
     }
     
     if ((str = rtnl_link_get_qdisc(link)) != NULL) {
 	strcpy(qdisc_name, str);
-	push_atm(atm_qdisc);
-	push_str(qdisc_name);
-	push_tuple(2);
-	elems++;
-    }
-
-    // iterate over all addresses find this link and print all 
-    // addresses bound to this link
-    // {inet,  {addr,Addr} [{bcast,Addr},{mask,Mask}]}
-    // {inet6, {addr,Addr} [{bcast,Addr},{mask,Mask}]}
-    {
-	struct nl_object* obj = nl_cache_get_first(dptr->addr_cache);
-	if (obj) {
-	    do {
-		struct rtnl_addr *addr = nl_object_priv(obj);
-		if (addr && (rtnl_addr_get_ifindex(addr) == if_index)) {
-		    struct nl_addr *naddr = rtnl_addr_get_local(addr);
-		    int family = nl_addr_get_family(naddr);
-		    if (family == AF_INET6) {
-			unsigned char* ptr = nl_addr_get_binary_addr(naddr);
-			unsigned int len = nl_addr_get_len(naddr);
-			int j;
-			push_atm(atm_inet6);
-			push_atm(atm_addr);
-			for (j = 0; j < len; j += 2) {
-			    push_int((ptr[j] << 8) + (ptr[j+1]));
-			}
-			push_tuple(len>>1);
-			push_tuple(2);
-			push_tuple(2);
-			elems++;
-		    }
-		    else if (family == AF_INET) {
-			unsigned char* ptr = nl_addr_get_binary_addr(naddr);
-			unsigned int len = nl_addr_get_len(naddr);
-			int j;
-			push_atm(atm_inet);
-			push_atm(atm_addr);
-			for (j = 0; j < len; j++) {
-			    push_int(ptr[j]);
-			}
-			push_tuple(len);
-			push_tuple(2);
-			push_tuple(2);
-			elems++;
-		    }
-		}
-		obj = nl_cache_get_next(obj);
-	    } while(obj);
+	dterm_tuple_begin(&m, &prop); {
+	    dterm_atom(&m,atm_qdisc);
+	    dterm_string(&m,qdisc_name,strlen(qdisc_name));
 	}
+	dterm_tuple_end(&m, &prop);
     }
 
-    push_nil();           // end of prop list
-    push_list(elems+1);  // element list & nil
-    push_tuple(2);
+    dterm_list_end(&m, &prop_list);
+    dterm_tuple_end(&m, &msg);
 
-    if (mix > (sizeof(message)/sizeof(ErlDrvTermData))) {
-	fprintf(stderr, "message build overflow\n");
+    driver_output_term(dptr->port, dterm_data(&m), dterm_used_size(&m));
+    if (m.base != m.data) {
+	fprintf(stderr, "dterm allocated %d bytes\r\n", 
+		dterm_allocated_size(&m));
+    }
+    dterm_finish(&m);
+
+    if (dptr->active > 0) {
+	dptr->active--;
+	if (dptr->active == 0)
+	    driver_select(dptr->port, dptr->event, ERL_DRV_READ, 0);
+    }
+}
+
+//
+// {netlink,[{label,Name},{index,I},
+//           {inet,{addr,A}},{inet,{bcast,A}},{inet,{mask,A}},
+//           {inet6,{addr,A}},{inet6,{bcast,A}},{inet6,{mask,A}}
+//           
+static void addr_obj_send(drv_data_t* dptr, struct rtnl_addr* addr)
+{
+    int if_index;
+    int family;
+    char label_name[256];
+    char* if_label;
+    dterm_t m;
+    dterm_mark_t msg;
+    dterm_mark_t prop;
+    dterm_mark_t prop_list;
+    
+    if_index = rtnl_addr_get_ifindex(addr);
+    if_label = rtnl_addr_get_label(addr);
+
+    fprintf(stderr, "addr_obj_send %s ifindex=%d\r\n", if_label, if_index);
+
+    dterm_init(&m);
+
+    // msg = {netlink,<port>,"route/addr",<prop_list>}
+    dterm_tuple_begin(&m, &msg);
+    dterm_atom(&m,atm_netlink);
+    dterm_port(&m, dptr->dport);
+    dterm_string(&m,"route/addr",10);
+
+    dterm_list_begin(&m, &prop_list);
+
+    if (if_label != NULL) {
+	dterm_tuple_begin(&m, &prop); {
+	    // {label,Label}
+	    strcpy(label_name, if_label);
+	    dterm_atom(&m,atm_label);
+	    dterm_string(&m,label_name,strlen(label_name));
+	}
+	dterm_tuple_end(&m, &prop);
     }
 
-    driver_output_term(dptr->port, message, mix);
+    dterm_tuple_begin(&m, &prop); {
+	// {index,Index}
+	dterm_atom(&m,atm_index);
+	dterm_int(&m,if_index);
+    }
+    dterm_tuple_end(&m, &prop);
+
+    family = rtnl_addr_get_family(addr);
+
+    dterm_nl_addr(&m,atm_addr, family,  rtnl_addr_get_local(addr));
+    dterm_nl_addr(&m,atm_bcast,family,  rtnl_addr_get_broadcast(addr));
+    // peer address (P-to-P) 
+    dterm_nl_addr(&m,atm_peer,family, rtnl_addr_get_peer(addr));
+    dterm_nl_addr(&m,atm_multicast,family, rtnl_addr_get_multicast(addr));
+
+    dterm_tuple_begin(&m, &prop); {
+	dterm_mark_t flag;
+	// {inet,{prefixlen,Len}}
+	dterm_atom(&m,(family == AF_INET6)?atm_inet6:atm_inet);
+	dterm_tuple_begin(&m, &flag); {
+	    dterm_atom(&m,atm_prefixlen);
+	    dterm_int(&m,rtnl_addr_get_prefixlen(addr));
+	}
+	dterm_tuple_end(&m, &flag);
+    }
+    dterm_tuple_end(&m, &prop);
+
+
+    dterm_list_end(&m, &prop_list);
+    dterm_tuple_end(&m, &msg);
+
+    driver_output_term(dptr->port, dterm_data(&m), dterm_used_size(&m));
+
+    if (m.base != m.data) {
+	fprintf(stderr, "dterm allocated %d bytes\r\n", 
+		dterm_allocated_size(&m));
+    }
+    dterm_finish(&m);
 
     if (dptr->active > 0) {
 	dptr->active--;
@@ -327,18 +401,29 @@ static void link_obj_send(drv_data_t* dptr, struct rtnl_link* link)
 
 static void link_obj_event(struct nl_object *obj, void *arg)
 {
-    struct rtnl_link* link = (struct rtnl_link*) obj;
     drv_data_t* dptr = (drv_data_t*) arg;
-    link_obj_send(dptr, link);
+    fprintf(stderr, "link_obj_event msgtype=%d\r\n", obj->ce_msgtype);
+    fprintf(stderr, "oo_name = %s\n", obj->ce_ops->oo_name);
+    if (strcmp(obj->ce_ops->oo_name, "route/link") == 0) {
+	struct rtnl_link* link = (struct rtnl_link*) obj;
+	link_obj_send(dptr, link);
+    }
+    else if (strcmp(obj->ce_ops->oo_name, "route/addr") == 0) {
+	struct rtnl_addr* addr = (struct rtnl_addr*) obj;
+	addr_obj_send(dptr, addr);
+    }
 }
 
 
 static int link_event_input(struct nl_msg *msg, void *arg)
 {
-    if (nl_msg_parse(msg, &link_obj_event, arg) < 0)
+    fprintf(stderr, "link_event_input\r\n");
+    if (nl_msg_parse(msg, &link_obj_event, arg) < 0) {
         fprintf(stderr, "link_event_input: Unknown message type\r\n");
-    // Exit nl_recvmsgs_def() and return to the main select()
-    return NL_STOP;
+	// Exit nl_recvmsgs_def() and return to the main select()
+	return NL_STOP;
+    }
+    return NL_OK;
 }
 
 static int nl_drv_init(void)
@@ -346,6 +431,7 @@ static int nl_drv_init(void)
     atm_netlink = driver_mk_atom("netlink");
     atm_name  = driver_mk_atom("name");
     atm_index = driver_mk_atom("index");
+    atm_label = driver_mk_atom("label");
     atm_mtu = driver_mk_atom("mtu");
     atm_txqlen = driver_mk_atom("txqlen");
     atm_flags = driver_mk_atom("flags");
@@ -355,9 +441,13 @@ static int nl_drv_init(void)
     atm_link_mode = driver_mk_atom("link_mode");
     atm_addr = driver_mk_atom("addr");
     atm_bcast = driver_mk_atom("bcast");
+    atm_peer = driver_mk_atom("peer");
+    atm_mcast = driver_mk_atom("mcast");
+    atm_prefixlen = driver_mk_atom("prefixlen");
     atm_qdisc = driver_mk_atom("qdisc");
     atm_inet = driver_mk_atom("inet");
     atm_inet6 = driver_mk_atom("inet6");
+    atm_undefined = driver_mk_atom("undefined");
 
     atm_up = driver_mk_atom("up");
     atm_down = driver_mk_atom("down");
@@ -469,14 +559,20 @@ static ErlDrvSSizeT nl_drv_ctl(ErlDrvData d,unsigned int cmd,char* buf,
 	nl_cli_connect(dptr->sock, NETLINK_ROUTE);
 	dptr->connected = 1;
 
-	if ((err = nl_socket_add_membership(dptr->sock, RTNLGRP_LINK)) < 0) {
+//	if ((err = nl_socket_add_membership(dptr->sock, RTNLGRP_LINK)) < 0) {
+
+	if ((err = nl_socket_add_memberships(dptr->sock,
+					     RTNLGRP_LINK,
+					     RTNLGRP_IPV4_IFADDR,
+					     RTNLGRP_IPV6_IFADDR,
+					     RTNLGRP_NONE)) < 0) {  
 	    err = 0;
-	    fprintf(stderr, "nl_socket_add_membership: error: %s\n", 
+	    fprintf(stderr, "nl_socket_add_membership: error: %s\r\n", 
 		    nl_geterror(err));
 	    // FIXME: mark this member ship and drop on error...
 	    goto L_error;
 	}
-
+	
 	if (!(dptr->link_cache = nl_cli_link_alloc_cache(dptr->sock))) {
 	    err = errno;
 	    fprintf(stderr, "unable to allocate nl_cli_link_cache\r\n");
@@ -488,6 +584,7 @@ static ErlDrvSSizeT nl_drv_ctl(ErlDrvData d,unsigned int cmd,char* buf,
 	    fprintf(stderr, "unable to allocate nl_cli_addr_cache\r\n");
 	    goto L_error;
 	}
+
 
 	if ((fd = nl_socket_get_fd(dptr->sock)) >= 0) {
 	    dptr->event = (ErlDrvEvent)((long)fd);
@@ -513,11 +610,19 @@ static ErlDrvSSizeT nl_drv_ctl(ErlDrvData d,unsigned int cmd,char* buf,
     case NL_CMD_REFRESH: {
 	if ((len != 0) || !(dptr->connected))
 	    goto L_einval;
-	// Loop at startup to get interface states updated!
+	// First do the link cache
 	struct nl_object* obj = nl_cache_get_first(dptr->link_cache);
 	if (obj) {
 	    do {
 		link_obj_send(dptr, (struct rtnl_link*) obj);
+		obj = nl_cache_get_next(obj);
+	    } while(obj);
+	}
+	// Now do the addr cache
+	obj = nl_cache_get_first(dptr->addr_cache);
+	if (obj) {
+	    do {
+		addr_obj_send(dptr, (struct rtnl_addr*) obj);
 		obj = nl_cache_get_next(obj);
 	    } while(obj);
 	}
@@ -594,6 +699,7 @@ static ErlDrvData nl_drv_start(ErlDrvPort port, char* command)
 
     memset(dptr, 0, sizeof(drv_data_t));
     dptr->port = port;
+    dptr->dport = driver_mk_port(port);
 
     if (!(dptr->sock = nl_cli_alloc_socket())) {
 	err = errno;
