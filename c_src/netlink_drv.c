@@ -8,8 +8,10 @@
 #include <unistd.h>
 #include <netlink/cli/link.h>
 #include <netlink/cli/addr.h>
+#include <netlink/cli/route.h>
 #include <netlink/cli/utils.h>
 #include <netlink/route/link.h>
+#include <netlink/route/route.h>
 #include <netlink/object-api.h>
 #include <linux/if.h>
 
@@ -31,6 +33,7 @@ typedef struct {
     struct nl_sock*  sock;
     struct nl_cache* link_cache;
     struct nl_cache* addr_cache;
+    struct nl_cache* route_cache;
 } drv_data_t;
 
 ErlDrvEntry nl_drv_entry;
@@ -55,6 +58,11 @@ ErlDrvTermData atm_prefixlen;
 ErlDrvTermData atm_qdisc;
 ErlDrvTermData atm_inet;
 ErlDrvTermData atm_inet6;
+ErlDrvTermData atm_dst;
+ErlDrvTermData atm_src;
+ErlDrvTermData atm_pref_src;
+ErlDrvTermData atm_metric;
+
 
 ErlDrvTermData atm_up;
 ErlDrvTermData atm_down;
@@ -399,6 +407,73 @@ static void addr_obj_send(drv_data_t* dptr, struct rtnl_addr* addr)
     }
 }
 
+
+//
+// {netlink,<port>,[{label,Name},{index,I},
+//           
+static void route_obj_send(drv_data_t* dptr, struct rtnl_route* route)
+{
+    int family;
+    dterm_t m;
+    dterm_mark_t msg;
+    dterm_mark_t prop;
+    dterm_mark_t prop_list;
+    
+    dterm_init(&m);
+
+    // msg = {netlink,<port>,"route/route",<prop_list>}
+    dterm_tuple_begin(&m, &msg);
+    dterm_atom(&m,atm_netlink);
+    dterm_port(&m, dptr->dport);
+    dterm_string(&m,"route/route",11);
+
+    dterm_list_begin(&m, &prop_list);
+
+    family = rtnl_route_get_family(route);
+
+    dterm_nl_addr(&m, atm_dst, family,  rtnl_route_get_dst(route));
+    dterm_nl_addr(&m, atm_src, family,  rtnl_route_get_src(route));
+    dterm_nl_addr(&m, atm_pref_src, family, rtnl_route_get_pref_src(route));
+
+    dterm_tuple_begin(&m, &prop); {
+	dterm_atom(&m, atm_metric);
+	// check if priority is correct here!
+	dterm_int(&m, rtnl_route_get_priority(route));
+	// dterm_int(&m, rtnl_route_get_metric(route,????));
+    }
+    dterm_tuple_end(&m, &prop);
+
+    dterm_tuple_begin(&m, &prop); {
+	dterm_atom(&m, atm_flags);
+	dterm_int(&m, rtnl_route_get_flags(route));
+    }
+    dterm_tuple_end(&m, &prop);
+
+    dterm_tuple_begin(&m, &prop); {
+	dterm_atom(&m, atm_index);
+	dterm_int(&m, rtnl_route_get_iif(route));
+    }
+    dterm_tuple_end(&m, &prop);
+
+    dterm_list_end(&m, &prop_list);
+    dterm_tuple_end(&m, &msg);
+
+    driver_output_term(dptr->port, dterm_data(&m), dterm_used_size(&m));
+
+    if (m.base != m.data) {
+	fprintf(stderr, "dterm allocated %d bytes\r\n", 
+		dterm_allocated_size(&m));
+    }
+    dterm_finish(&m);
+
+    if (dptr->active > 0) {
+	dptr->active--;
+	if (dptr->active == 0)
+	    driver_select(dptr->port, dptr->event, ERL_DRV_READ, 0);
+    }
+}
+
+
 static void link_obj_event(struct nl_object *obj, void *arg)
 {
     drv_data_t* dptr = (drv_data_t*) arg;
@@ -411,6 +486,10 @@ static void link_obj_event(struct nl_object *obj, void *arg)
     else if (strcmp(obj->ce_ops->oo_name, "route/addr") == 0) {
 	struct rtnl_addr* addr = (struct rtnl_addr*) obj;
 	addr_obj_send(dptr, addr);
+    }
+    else if (strcmp(obj->ce_ops->oo_name, "route/route") == 0) {
+	struct rtnl_route* route = (struct rtnl_route*) obj;
+	route_obj_send(dptr, route);
     }
 }
 
@@ -448,6 +527,10 @@ static int nl_drv_init(void)
     atm_inet = driver_mk_atom("inet");
     atm_inet6 = driver_mk_atom("inet6");
     atm_undefined = driver_mk_atom("undefined");
+    atm_dst = driver_mk_atom("dst");
+    atm_src = driver_mk_atom("src");
+    atm_pref_src = driver_mk_atom("pref_src");
+    atm_metric = driver_mk_atom("metric");
 
     atm_up = driver_mk_atom("up");
     atm_down = driver_mk_atom("down");
@@ -474,14 +557,15 @@ static int nl_drv_init(void)
 
 static void       nl_drv_finish(void)
 {
-    fprintf(stderr, "nl_drv_finish called!!!\r\n");
+    // fprintf(stderr, "nl_drv_finish called!!!\r\n");
 }
 
 static void       nl_drv_stop(ErlDrvData d)
 {
     drv_data_t* dptr = (drv_data_t*) d;
 
-    fprintf(stderr, "nl_drv_stop called!!!\r\n");
+    // fprintf(stderr, "nl_drv_stop called!!!\r\n");
+
     if (dptr) {
 	if (dptr->active)
 	    driver_select(dptr->port, dptr->event, ERL_DRV_READ, 0);
@@ -494,6 +578,9 @@ static void       nl_drv_stop(ErlDrvData d)
 	}
 	if (dptr->addr_cache) {
 	    nl_cache_free(dptr->addr_cache);
+	}
+	if (dptr->route_cache) {
+	    nl_cache_free(dptr->route_cache);
 	}
 	driver_free(dptr);
     }
@@ -565,6 +652,8 @@ static ErlDrvSSizeT nl_drv_ctl(ErlDrvData d,unsigned int cmd,char* buf,
 					     RTNLGRP_LINK,
 					     RTNLGRP_IPV4_IFADDR,
 					     RTNLGRP_IPV6_IFADDR,
+					     RTNLGRP_IPV4_ROUTE,
+					     RTNLGRP_IPV6_ROUTE,
 					     RTNLGRP_NONE)) < 0) {  
 	    err = 0;
 	    fprintf(stderr, "nl_socket_add_membership: error: %s\r\n", 
@@ -585,6 +674,11 @@ static ErlDrvSSizeT nl_drv_ctl(ErlDrvData d,unsigned int cmd,char* buf,
 	    goto L_error;
 	}
 
+	if (!(dptr->route_cache = nl_cli_route_alloc_cache(dptr->sock,0))) {
+	    err = errno;
+	    fprintf(stderr, "unable to allocate nl_cli_route_cache\r\n");
+	    goto L_error;
+	}
 
 	if ((fd = nl_socket_get_fd(dptr->sock)) >= 0) {
 	    dptr->event = (ErlDrvEvent)((long)fd);
@@ -623,6 +717,14 @@ static ErlDrvSSizeT nl_drv_ctl(ErlDrvData d,unsigned int cmd,char* buf,
 	if (obj) {
 	    do {
 		addr_obj_send(dptr, (struct rtnl_addr*) obj);
+		obj = nl_cache_get_next(obj);
+	    } while(obj);
+	}
+	// And the route cache
+	obj = nl_cache_get_first(dptr->route_cache);
+	if (obj) {
+	    do {
+		route_obj_send(dptr, (struct rtnl_route*) obj);
 		obj = nl_cache_get_next(obj);
 	    } while(obj);
 	}
@@ -669,6 +771,10 @@ L_error:
     if (dptr->addr_cache != NULL) {
 	nl_cache_free(dptr->addr_cache);
 	dptr->addr_cache = NULL;
+    }
+    if (dptr->route_cache != NULL) {
+	nl_cache_free(dptr->route_cache);
+	dptr->route_cache = NULL;
     }
 	
     rdata[0] = NL_REP_ERROR;
