@@ -19,6 +19,7 @@
 	 terminate/2, code_change/3]).
 -export([i/0, list/1, select/1]).
 -export([subscribe/1, subscribe/2, subscribe/3]).
+-export([unsubscribe/1]).
 
 -define(SERVER, ?MODULE). 
 
@@ -134,6 +135,10 @@ subscribe(Name,Fields) ->
 subscribe(Name,Fields,Options) ->
     gen_server:call(?SERVER, {subscribe, self(),Name,Options,Fields}).
 
+
+unsubscribe(Ref) ->
+    gen_server:call(?SERVER, {unsubscribe,Ref}).
+
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -223,6 +228,14 @@ handle_call({subscribe, Pid, Name, Options, Fs}, _From, State) ->
 	      end, State#state.link_list),
 	    {reply, {ok,Mon}, State#state { sub_list = SList }}
     end;
+handle_call({unsubscribe,Ref}, _From, State) ->
+    case lists:keytake(Ref, #subscription.mon, State#state.sub_list) of
+	false ->
+	    {reply,ok,State};
+	{value,_S,SubList} ->
+	    erlang:demonitor(Ref),
+	    {reply,ok,State#state { sub_list=SubList }}
+    end;
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 handle_call(_Request, _From, State) ->
@@ -280,6 +293,15 @@ handle_info(_Info={netlink,Port,"route/addr",As}, State)
 		    State1 = update_if(Index, Label, As1, State),
 		    {noreply, State1}
 	    end
+    end;
+handle_info({'DOWN',Ref,process,Pid,Reason}, State) ->
+    case lists:keytake(Ref, #subscription.mon, State#state.sub_list) of
+	false ->
+	    {noreply,State};
+	{value,_S,SubList} ->
+	    io:format("subscription from pid ~p deleted reason=~p\n",
+		      [Pid, Reason]),
+	    {noreply,State#state { sub_list=SubList }}
     end;
 handle_info(_Info, State) ->
     io:format("INFO: ~p\n", [_Info]),
