@@ -38,7 +38,14 @@ $(CONFIG_TARGET): $(UNPACK_TARGET)
 ifeq ($(X_COMP_TARGET_ARCH),)
 	(cd $(NL_DIR); ./configure --disable-dependency-tracking --prefix=$(NL_INSTALL_DIR))
 else
-	(cd $(NL_DIR); ./configure --host $(X_COMP_TARGET_ARCH) --disable-dependency-tracking --prefix=$(NL_INSTALL_DIR))
+	(cd $(NL_DIR); \
+	 CC=$(CC) \
+	 CFLAGS="$(CFLAGS)" \
+	 LDFLAGS="" \
+	 LD=$(LD) \
+	 AR=$(AR) \
+	 RANLIB=$(RANLIB) \
+	 ./configure --host $(X_COMP_TARGET_ARCH) --disable-dependency-tracking --prefix=$(NL_INSTALL_DIR))
 endif
 $(UNPACK_TARGET):
 	tar xf $(NL_TAR)
