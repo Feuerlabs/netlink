@@ -12,6 +12,7 @@
 #include <netlink/cli/utils.h>
 #include <netlink/route/link.h>
 #include <netlink/route/route.h>
+#include <netlink/route/nexthop.h>
 #include <netlink/object-api.h>
 #include <linux/if.h>
 
@@ -62,6 +63,15 @@ ErlDrvTermData atm_dst;
 ErlDrvTermData atm_src;
 ErlDrvTermData atm_pref_src;
 ErlDrvTermData atm_metric;
+ErlDrvTermData atm_scope;
+ErlDrvTermData atm_tos;
+ErlDrvTermData atm_protocol;
+ErlDrvTermData atm_priority;
+ErlDrvTermData atm_type;
+ErlDrvTermData atm_weight;
+ErlDrvTermData atm_gateway;
+ErlDrvTermData atm_realms;
+ErlDrvTermData atm_nexthop;
 
 
 ErlDrvTermData atm_up;
@@ -407,6 +417,48 @@ static void addr_obj_send(drv_data_t* dptr, struct rtnl_addr* addr)
     }
 }
 
+//
+// Build [{weight,W}...{gateway,Gw}]
+//
+static void make_nexthop(dterm_t* p, int family, struct rtnl_nexthop* n)
+{
+    dterm_mark_t prop;
+    dterm_mark_t prop_list;
+    
+    dterm_list_begin(p, &prop_list);
+
+    dterm_tuple_begin(p, &prop); {
+	// weight
+	dterm_atom(p, atm_weight);
+	dterm_int(p, rtnl_route_nh_get_weight(n));
+    }
+    dterm_tuple_end(p, &prop);
+
+    dterm_tuple_begin(p, &prop); {
+	// weight
+	dterm_atom(p, atm_index);
+	dterm_int(p, rtnl_route_nh_get_ifindex(n));
+    }
+    dterm_tuple_end(p, &prop);
+
+    dterm_nl_addr(p, atm_gateway, family, rtnl_route_nh_get_gateway(n));
+    
+    dterm_tuple_begin(p, &prop); {
+	// flags
+	dterm_atom(p, atm_flags);
+	dterm_int(p, rtnl_route_nh_get_flags(n));
+    }
+    dterm_tuple_end(p, &prop);
+
+    dterm_tuple_begin(p, &prop); {
+	// flags
+	dterm_atom(p, atm_realms);
+	dterm_int(p, rtnl_route_nh_get_realms(n));
+    }
+    dterm_tuple_end(p, &prop);
+
+    dterm_list_end(p, &prop_list);
+}
 
 //
 // {netlink,<port>,[{label,Name},{index,I},
@@ -419,6 +471,8 @@ static void route_obj_send(drv_data_t* dptr, struct rtnl_route* route)
     dterm_mark_t prop;
     dterm_mark_t prop_list;
     
+    family = rtnl_route_get_family(route);
+
     dterm_init(&m);
 
     // msg = {netlink,<port>,"route/route",<prop_list>}
@@ -429,17 +483,36 @@ static void route_obj_send(drv_data_t* dptr, struct rtnl_route* route)
 
     dterm_list_begin(&m, &prop_list);
 
-    family = rtnl_route_get_family(route);
-
-    dterm_nl_addr(&m, atm_dst, family,  rtnl_route_get_dst(route));
-    dterm_nl_addr(&m, atm_src, family,  rtnl_route_get_src(route));
-    dterm_nl_addr(&m, atm_pref_src, family, rtnl_route_get_pref_src(route));
+    dterm_tuple_begin(&m, &prop); {
+	// scope
+	dterm_atom(&m, atm_scope);
+	dterm_int(&m, rtnl_route_get_scope(route));
+    }
+    dterm_tuple_end(&m, &prop);
 
     dterm_tuple_begin(&m, &prop); {
-	dterm_atom(&m, atm_metric);
-	// check if priority is correct here!
+	// tos
+	dterm_atom(&m, atm_tos);
+	dterm_int(&m, rtnl_route_get_tos(route));
+    }
+    dterm_tuple_end(&m, &prop);
+
+    dterm_tuple_begin(&m, &prop); {
+	// protocol
+	dterm_atom(&m, atm_protocol);
+	dterm_int(&m, rtnl_route_get_protocol(route));
+    }
+    dterm_tuple_end(&m, &prop);
+
+    dterm_tuple_begin(&m, &prop); {
+	dterm_atom(&m, atm_priority);
 	dterm_int(&m, rtnl_route_get_priority(route));
-	// dterm_int(&m, rtnl_route_get_metric(route,????));
+    }
+    dterm_tuple_end(&m, &prop);
+
+    dterm_tuple_begin(&m, &prop); {
+	dterm_atom(&m, atm_type);
+	dterm_int(&m, rtnl_route_get_type(route));
     }
     dterm_tuple_end(&m, &prop);
 
@@ -450,8 +523,37 @@ static void route_obj_send(drv_data_t* dptr, struct rtnl_route* route)
     dterm_tuple_end(&m, &prop);
 
     dterm_tuple_begin(&m, &prop); {
+	uint32_t value;
+	dterm_atom(&m, atm_metric);
+	// loop?
+	rtnl_route_get_metric(route,0,&value);
+	dterm_int(&m, (int)value);
+    }
+    dterm_tuple_end(&m, &prop);
+
+    dterm_nl_addr(&m, atm_dst, family,  rtnl_route_get_dst(route));
+    dterm_nl_addr(&m, atm_src, family,  rtnl_route_get_src(route));
+    dterm_nl_addr(&m, atm_pref_src, family, rtnl_route_get_pref_src(route));
+
+    dterm_tuple_begin(&m, &prop); {
 	dterm_atom(&m, atm_index);
 	dterm_int(&m, rtnl_route_get_iif(route));
+    }
+    dterm_tuple_end(&m, &prop);
+
+    dterm_tuple_begin(&m, &prop); {
+	dterm_mark_t nexthop_list;	
+	dterm_atom(&m, atm_nexthop);
+	dterm_list_begin(&m, &nexthop_list); {
+	    int len = rtnl_route_get_nnexthops(route);
+	    int i;
+	    for (i = 0; i < len; i++) {
+		struct rtnl_nexthop *n;
+		n = rtnl_route_nexthop_n(route, i);
+		make_nexthop(&m, family, n);
+	    }
+	}
+        dterm_list_end(&m, &nexthop_list);
     }
     dterm_tuple_end(&m, &prop);
 
@@ -531,6 +633,16 @@ static int nl_drv_init(void)
     atm_src = driver_mk_atom("src");
     atm_pref_src = driver_mk_atom("pref_src");
     atm_metric = driver_mk_atom("metric");
+    atm_scope = driver_mk_atom("scope");
+    atm_tos = driver_mk_atom("tos");
+    atm_protocol = driver_mk_atom("protocol");
+    atm_priority = driver_mk_atom("priority");
+    atm_type = driver_mk_atom("type");
+    atm_weight = driver_mk_atom("weight");
+    atm_gateway = driver_mk_atom("gateway");
+    atm_realms = driver_mk_atom("realms");
+    atm_nexthop = driver_mk_atom("nexthop");
+
 
     atm_up = driver_mk_atom("up");
     atm_down = driver_mk_atom("down");
