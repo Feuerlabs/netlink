@@ -36,7 +36,7 @@ $(BUILD_TARGET): $(CONFIG_TARGET)
 $(CONFIG_TARGET): $(UNPACK_TARGET)
 # Check if this is a local build or not
 ifeq ($(X_COMP_TARGET_ARCH),)
-	(cd $(NL_DIR); ./configure --disable-dependency-tracking --prefix=$(NL_INSTALL_DIR))
+	(cd $(NL_DIR); 	 LDFLAGS="" ./configure --disable-dependency-tracking --prefix=$(NL_INSTALL_DIR))
 else
 	(cd $(NL_DIR); \
 	 CC=$(CC) \
