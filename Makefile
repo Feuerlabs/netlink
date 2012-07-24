@@ -30,14 +30,14 @@ all: $(INSTALL_TARGET)
 $(INSTALL_TARGET): $(BUILD_TARGET)
 	(cd $(NL_DIR); make install)
 	@-mkdir priv > /dev/null 2>&1 
-#	(cp $(NL_INSTALL_DIR)/lib/*.so.* priv)
+	(cp $(NL_INSTALL_DIR)/lib/*.so.* priv)
 $(BUILD_TARGET): $(CONFIG_TARGET)
 	(cd $(NL_DIR); make)
 
 $(CONFIG_TARGET): $(UNPACK_TARGET)
 # Check if this is a local build or not
 ifeq ($(X_COMP_TARGET_ARCH),)
-	(cd $(NL_DIR); 	 LDFLAGS="" ./configure --enable-static=yes --enable-shared=no --disable-dependency-tracking --prefix=$(NL_INSTALL_DIR))
+	(cd $(NL_DIR); 	 LDFLAGS="" ./configure --enable-static=no --enable-shared=yes --disable-dependency-tracking --prefix=$(NL_INSTALL_DIR))
 else
 	(cd $(NL_DIR); \
 	 CC=$(CC) \
@@ -46,7 +46,7 @@ else
 	 LD=$(LD) \
 	 AR=$(AR) \
 	 RANLIB=$(RANLIB) \
-	 ./configure --host $(X_COMP_TARGET_ARCH) --enable-static=yes --enable-shared=no --disable-dependency-tracking --prefix=$(NL_INSTALL_DIR))
+	 ./configure --host $(X_COMP_TARGET_ARCH) --enable-static=no --enable-shared=yes --disable-dependency-tracking --prefix=$(NL_INSTALL_DIR))
 endif
 $(UNPACK_TARGET):
 	tar xf $(NL_TAR)
