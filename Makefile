@@ -43,9 +43,9 @@ else
 	 CC="$(CC)" \
 	 CFLAGS="$(CFLAGS)" \
 	 LDFLAGS="" \
-	 LD=$(LD) \
-	 AR=$(AR) \
-	 RANLIB=$(RANLIB) \
+	 LD=$"(LD)" \
+	 AR="$(AR)" \
+	 RANLIB="$(RANLIB)" \
 	 ./configure --host $(X_COMP_TARGET_ARCH) --enable-static=no --enable-shared=yes --disable-dependency-tracking --prefix=$(NL_INSTALL_DIR))
 endif
 $(UNPACK_TARGET):
