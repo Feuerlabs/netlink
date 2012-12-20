@@ -1,6 +1,11 @@
+.PHONY: libnl
+
 PRIVDIR := ../priv
 
-all : $(PRIVDIR)/netlink_drv.so
+all : libnl $(PRIVDIR)/netlink_drv.so
+
+libnl:
+	(cd ..; make)
 
 override CFLAGS += -fpic -shared
 
