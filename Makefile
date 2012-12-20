@@ -40,7 +40,7 @@ ifeq ($(X_COMP_TARGET_ARCH),)
 	(cd $(NL_DIR); 	 LDFLAGS="" ./configure --enable-static=no --enable-shared=yes --disable-dependency-tracking --prefix=$(NL_INSTALL_DIR))
 else
 	(cd $(NL_DIR); \
-	 CC=$(CC) \
+	 CC=$(X_COMP_TARGET_ARCH)-gcc \
 	 CFLAGS="$(CFLAGS)" \
 	 LDFLAGS="" \
 	 LD=$(LD) \
