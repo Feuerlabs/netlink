@@ -15,10 +15,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-//#include <netlink/cli/link.h>
-//#include <netlink/cli/addr.h>
-//#include <netlink/cli/route.h>
-//#include <netlink/cli/utils.h>
+#include <netlink/cli/link.h>
+#include <netlink/cli/addr.h>
+#include <netlink/cli/route.h>
+#include <netlink/cli/utils.h>
 #include <netlink/route/link.h>
 #include <netlink/route/route.h>
 #include <netlink/route/nexthop.h>
