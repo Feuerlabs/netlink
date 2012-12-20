@@ -5,7 +5,7 @@ PRIVDIR := ../priv
 all : libnl $(PRIVDIR)/netlink_drv.so
 
 libnl:
-	(cd ..; make)
+	(cd ..; make C_COMP_TARGET_ARCH=arm-tplino-linux-gnueabi)
 
 override CFLAGS += -fpic -shared -I../libnl/include
 
