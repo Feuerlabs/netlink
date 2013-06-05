@@ -28,61 +28,36 @@
 -export([i/0, list/1, select/1]).
 -export([subscribe/1, subscribe/2, subscribe/3]).
 -export([unsubscribe/1]).
+-export([get_root/2, get_match/3, get/4]).
+
+-include_lib("lager/include/log.hrl").
+-include("netlink.hrl").
+-include("netl_codec.hrl").
 
 -define(SERVER, ?MODULE). 
 
--type if_inet_field() ::
-	{inet,addr} | {inet,bcast} | {inet,mcast} | {inet,peer} | 
-	{inet,prefixlen}.
-
--type if_inet6_field() ::
-	{inet6,addr} | {inet6,bcast} | {inet6,mcast} | {inet6,peer} | 
-	{inet6,prefixlen}.	
-
--type if_addr_field() :: if_inet_field() | if_inet6_field().
+-type if_addr_field() :: address | local | broadcast | anycast | multicast.
 
 -type if_link_field() :: name | index | mtu | txqlen | flags | 
-			 if_state | if_lower_state | oper_status |
-			 qdisc | {eth,addr} | {eth,bcast}.
+			 operstate | qdisc | address | broadcast.
 
 -type if_field() :: if_link_field() | if_addr_field().
 
 -type if_name() :: string().
--type if_flag() :: atom().
+
 
 -record(link,
 	{
-	  name     :: if_name(),
-	  index    :: non_neg_integer(),
-	  mtu      :: non_neg_integer(),
-	  txqlen   :: non_neg_integer(),
-	  flags    :: [if_flag()],
-	  if_state :: up | down,
-	  if_lower_state :: up | down,
-	  oper_status :: string(),
-	  link_mode   :: string(),
-	  qdisc      :: string(),
-	  addr,   %% link address
-	  bcast   %% link broadcast
+	  name     :: if_name(),          %% interface label or ""
+	  index    :: non_neg_integer(),  %% interface index
+	  attr     :: dict()              %% attributes {atom(),term}
 	}).
 
--record(address,
+-record(addr,
 	{
-	  addr,   %% local address
-	  bcast,  %% broadcast address
-	  mcast,  %% multicast address 
-	  peer,   %% peer address (p-to-p)
-	  prefixlen
-	}).
-
-%% name == link_name => main interface!
--record(interface,
-	{
-	  name       :: if_name(),  %% interface name
-	  link_name  :: if_name(),  %% link name
-	  index      :: integer(),  %% link index
-	  inet       :: #address{},
-	  inet6      :: #address{}
+	  name     :: if_name(),  %% "virtual" name
+	  index    :: non_neg_integer(),  %% interface index
+	  attr     :: dict()      %% attributes
 	}).
 
 -record(subscription,
@@ -93,12 +68,28 @@
 	  fields=all :: all | [if_field()]
 	}).
 
+-define(REQUEST_TMO, 2000).
+
+-record(request,
+	{
+	  tmr,      %% timer reference
+	  call,     %% call request
+	  from,     %% caller
+	  reply=ok, %% reply to send when done
+	  seq=0     %% sequence to expect in reply
+	}).
+
 -record(state, 
 	{
 	  port,
-	  if_list   = [] :: #interface {},
-	  link_list = [] :: #link {},
-	  sub_list  = [] :: #subscription {}
+	  link_list  = [] :: [#link {}],
+	  addr_list  = [] :: [#addr {}],
+	  sub_list   = [] :: [#subscription {}],
+	  request         :: undefined | #request{},
+	  request_queue = [] :: [#request{}],
+	  o_seq = 0,
+	  i_seq = 0,
+	  ospid
         }).
 
 %%%===================================================================
@@ -143,9 +134,17 @@ subscribe(Name,Fields) ->
 subscribe(Name,Fields,Options) ->
     gen_server:call(?SERVER, {subscribe, self(),Name,Options,Fields}).
 
-
 unsubscribe(Ref) ->
     gen_server:call(?SERVER, {unsubscribe,Ref}).
+
+get_root(What,Fam) ->
+    get(What,Fam,[root,match,request],[]).
+
+get_match(What,Fam,GetAttrs) ->
+    get(What,Fam,[match,request],GetAttrs).
+
+get(What,Fam,GetFlags,GetAttrs) ->
+    gen_server:call(?SERVER, {get,What,Fam,GetFlags,GetAttrs}).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -173,11 +172,42 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
-    Port = netlink_drv:open(),
-    netlink_drv:connect(Port),
+    OsPid = list_to_integer(os:getpid()),
+    I_Seq = O_Seq = 1234, %% element(2,now()),
+    Port = netlink_drv:open(?NETLINK_ROUTE),
+    %% netlink_drv:debug(Port, debug),
+    netlink_drv:add_membership(Port, ?RTNLGRP_LINK),
+    netlink_drv:add_membership(Port, ?RTNLGRP_IPV4_IFADDR),
     netlink_drv:activate(Port),
-    netlink_drv:refresh(Port),
-    {ok, #state{ port=Port }}.
+    %% init sequence to fill the cache
+    T0 = erlang:start_timer(1000, self(), request_timeout),
+    R0 = #request { tmr  = T0, 
+		    call = noop, 
+		    from = {self(),make_ref()} 
+		  },
+    R1 = #request { tmr  = {relative, ?REQUEST_TMO},
+		    call = {get,link,unspec,
+			    [root,match,request],
+			    []},
+		    from = {self(),make_ref()}
+		  },
+    R2 = #request { tmr  = {relative, 1000}, 
+		    call = noop,
+		    from = {self(),make_ref()}
+		  },
+    R3 = #request { tmr = {relative,?REQUEST_TMO},
+		    call = {get,addr,unspec,
+			    [root,match,request],
+			    []},
+		    from = {self(),make_ref()}
+		  },
+    {ok, #state{ port=Port,
+		 ospid = OsPid, 
+		 o_seq = O_Seq, 
+		 i_seq = I_Seq,
+		 request = R0,
+		 request_queue = [R1,R2,R3]
+	       }}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -195,26 +225,27 @@ init([]) ->
 %%--------------------------------------------------------------------
 handle_call({list,Match}, _From, State) ->
     lists:foreach(
-      fun(I) ->
-	      L = lists:keyfind(I#interface.index, 
+      fun(Y) ->
+	      L = lists:keyfind(Y#addr.index, 
 				#link.index, State#state.link_list),
-	      case match(I,L,Match) of
+	      case match(Y#addr.attr,L#link.attr,Match) of
 		  true ->
-		      io:format("interface { ~s ~s}\n",
-				[format_interface(I),format_link(L)]);
+		      io:format("interface {~s~s}\n",
+				[format_addr(Y),format_link(L)]);
 		  false ->
 		      ok
 	      end
-      end, State#state.if_list),
+      end, State#state.addr_list),
     {reply, ok, State};
 handle_call({match,Match}, _From, State) ->
-    IfList = lists:filter(
-	       fun(I) -> 
-		       L = lists:keyfind(I#interface.index, 
-					 #link.index, State#state.link_list),
-		       match(I,L,Match) 
-	       end, 
-	       State#state.if_list),
+    IfList = 
+	lists:filter(
+	  fun(Y) -> 
+		  L = lists:keyfind(Y#addr.index, 
+				    #link.index, State#state.link_list),
+		  match(Y,L,Match)
+	  end, 
+	  State#state.addr_list),
     {reply, IfList, State};
 handle_call({subscribe, Pid, Name, Options, Fs}, _From, State) ->
     Mon = erlang:monitor(process, Pid),
@@ -225,15 +256,15 @@ handle_call({subscribe, Pid, Name, Options, Fs}, _From, State) ->
 	    {reply, {ok,Mon}, State#state { sub_list = SList }};
 	true ->
 	    lists:foreach(
-	      fun(I) ->
-		      Kvs = interface_to_kv(I),
-		      if_update(#interface{}, Kvs, [S])
-	      end, State#state.if_list),
-	    lists:foreach(
 	      fun(L) ->
-		      Kvs = link_to_kv(L),
-		      link_update(#link{}, Kvs, [S])
+		      As = dict:to_list(L#link.attr),
+		      update_attrs(L#link.name, As, dict:new(), [S])
 	      end, State#state.link_list),
+	    lists:foreach(
+	      fun(Y) ->
+		      As = dict:to_list(Y#addr.attr),
+		      update_attrs(Y#addr.name, As, dict:new(), [S])
+	      end, State#state.addr_list),
 	    {reply, {ok,Mon}, State#state { sub_list = SList }}
     end;
 handle_call({unsubscribe,Ref}, _From, State) ->
@@ -244,6 +275,11 @@ handle_call({unsubscribe,Ref}, _From, State) ->
 	    erlang:demonitor(Ref),
 	    {reply,ok,State#state { sub_list=SubList }}
     end;
+handle_call(Req={get,_What,_Fam,_Flags,_Attrs}, From, State) ->
+    ?debug("handle_call: GET: ~p", [Req]),
+    State1 = enq_request(Req, From, State),
+    State2 = dispatch_command(State1),
+    {noreply, State2};
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 handle_call(_Request, _From, State) ->
@@ -273,46 +309,59 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info(_Info={netlink,Port,"route/link",As}, State) 
-  when Port =:= State#state.port ->
-    io:format("handle_info: ~p\n", [_Info]),
-    case proplists:get_value(name, As, "") of
-	"" -> 
-	    {noreply,State};
-	Name ->
-	    State1 = update_link_by_name(Name, As, State),
+
+handle_info(_Info={nl_data,Port,Data},State) when Port =:= State#state.port ->
+    try netlink_codec:decode(Data,[]) of
+	MsgList ->
+	    State1 = 
+		lists:foldl(
+		  fun(Msg,StateI) ->
+			  ?debug("handle_info: msg=~p", [Msg]),
+			  _Hdr = Msg#nlmsg.hdr,
+			  MsgData = Msg#nlmsg.data,
+			  handle_nlmsg(MsgData, StateI)
+		  end, State, MsgList),
 	    {noreply, State1}
+    catch
+	error:_ ->
+	    ?error("netlink: handle_info: Crash: ~p", 
+		   [erlang:get_stacktrace()]),
+	    {noreply, State}
     end;
 
-handle_info(_Info={netlink,Port,"route/addr",As}, State) 
-  when Port =:= State#state.port ->
-    io:format("handle_info: ~p\n", [_Info]),
-    case proplists:get_value(index, As) of
-	undefined ->
-	    {noreply,State};	
-	Index ->
-	    L = lists:keyfind(Index, #link.index, State#state.link_list),
-	    if L =:= false ->
-		    io:format("No such index ~p\n", [Index]),
-		    {noreply,State};
-	       true ->
-		    Label = proplists:get_value(label,As),
-		    As1 = [{link_name,L#link.name}|proplists:delete(label,As)],
-		    State1 = update_if(Index, Label, As1, State),
-		    {noreply, State1}
-	    end
-    end;
 handle_info({'DOWN',Ref,process,Pid,Reason}, State) ->
     case lists:keytake(Ref, #subscription.mon, State#state.sub_list) of
 	false ->
 	    {noreply,State};
 	{value,_S,SubList} ->
-	    io:format("subscription from pid ~p deleted reason=~p\n",
-		      [Pid, Reason]),
+	    ?debug("subscription from pid ~p deleted reason=~p",
+		   [Pid, Reason]),
 	    {noreply,State#state { sub_list=SubList }}
     end;
+handle_info({timeout,Tmr,request_timeout}, State) ->
+    R = State#state.request,
+    if R#request.tmr =:= Tmr ->
+	    ?debug("Timeout: ref current", []),
+	    gen_server:reply(R#request.from, {error,timeout}),
+	    State1 = State#state { request = undefined },
+	    {noreply, dispatch_command(State1)};
+       true ->
+	    case lists:keytake(Tmr, #request.tmr, State#state.request_queue) of
+		false ->
+		    ?debug("Timeout: ref not found", []),
+		    {noreply, State};
+		{value,#request { from = From},Q} ->
+		    ?debug("Timeout: ref in queue", []),
+		    gen_server:reply(From, {error,timeout}),
+		    State1 = State#state { request_queue = Q },
+		    {noreply,dispatch_command(State1)}
+	    end
+    end;
+handle_info({Tag, Reply}, State) when is_reference(Tag) ->
+    ?debug("INFO: SELF Reply=~p", [Reply]),
+    {noreply, State};    
 handle_info(_Info, State) ->
-    io:format("INFO: ~p\n", [_Info]),
+    ?debug("INFO: ~p", [_Info]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -344,205 +393,191 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-%% convert iterface to key value list
-interface_to_kv(If) when is_record(If,interface) ->
-    lists:zipwith(
-      fun(K,Vi) -> {K,element(Vi,If)} end, 
-      record_info(fields, interface),
-      lists:seq(2, tuple_size(If))).
-
-%% convert iterface to key value list
-link_to_kv(L) when is_record(L,link) ->
-    lists:zipwith(
-      fun(K,Vi) -> {K,element(Vi,L)} end, 
-      record_info(fields, link),
-      lists:seq(2, tuple_size(L))).
+enq_request(Call, From, State) ->
+    Tmr = erlang:start_timer(?REQUEST_TMO, self(), request_timeout),
+    R = #request { tmr  = Tmr, 
+		   call = Call,
+		   from = From
+		 },
+    Q = State#state.request_queue ++ [R],
+    State#state { request_queue = Q }.
     
-
-update_link_by_name(Name, As, State) ->
-    case lists:keytake(Name, #link.name, State#state.link_list) of
-	false ->
-	    Ls = [link_update(#link{}, As, State#state.sub_list)|
-		  State#state.link_list],
-	    State#state { link_list=Ls };
-	{value,Link,Ls0} ->
-	    Ls = [link_update(Link, As,State#state.sub_list)|Ls0],
-	    State#state { link_list=Ls }
-    end.
-
-%% 
-%% 
-%%
-update_if(Index,undefined,As,State) ->
-    update_if_by_index(Index, As, State);
-update_if(_Index,Label,As,State) ->
-    case lists:keytake(Label, #interface.name, State#state.if_list) of
-	false ->
-	    %% create new "virtual" interface
-	    Is = [if_update(#interface{name=Label}, As, State#state.sub_list) |
-		  State#state.if_list],
-	    State#state { if_list=Is };
-	{value,I,Is0} ->
-	    %% update "virtual" interface
-	    Is = [if_update(I, As, State#state.sub_list)|Is0],
-	    State#state { if_list=Is }
-    end.
-
-update_if_by_index(Index, As, State) ->
-    case lists:keytake(Index, #interface.index, State#state.if_list) of
-	false ->
-	    Is = [if_update(#interface{}, As,State#state.sub_list) |
-		  State#state.if_list],
-	    State#state { if_list=Is };
-	{value,I,Is0} ->
-	    Is = [if_update(I, As, State#state.sub_list)|Is0],
-	    State#state { if_list=Is }
-    end.
-
-
--define(LUPDATE(I,F,V,S), 
-	(I)#link{F=l_update((I),F,(I)#link.F, (V),S)}).
-
-link_update(L, [Kv | Kvs], S) ->
-    case Kv of
-	{name,V} ->
-	    link_update(?LUPDATE(L,name,V,S), Kvs, S);
-	{index,V} ->
-	    link_update(?LUPDATE(L,index,V,S), Kvs, S);
-	{mtu,V} ->
-	    link_update(?LUPDATE(L,mtu,V,S), Kvs, S);
-	{txqlen,V} ->
-	    link_update(?LUPDATE(L,txqlen,V,S), Kvs, S);
-	{flags,V} ->
-	    link_update(?LUPDATE(L,flags,V,S), Kvs, S);	
-	{if_state,V} ->
-	    link_update(?LUPDATE(L,if_state,V,S), Kvs, S);
-	{if_lower_state,V} ->
-	    link_update(?LUPDATE(L,if_lower_state,V,S), Kvs, S);
-	{oper_status,V} ->
-	    link_update(?LUPDATE(L,oper_status,V,S), Kvs, S);	
-	{link_mode,V} ->
-	    link_update(?LUPDATE(L,link_mode,V,S), Kvs, S);
-	{addr,V} ->
-	    link_update(?LUPDATE(L,addr,V,S), Kvs, S);
-	{bcast,V} ->
-	    link_update(?LUPDATE(L,bcast,V,S), Kvs, S);
-	{qdisc,V} ->
-	    link_update(?LUPDATE(L,qdisc,V,S), Kvs, S);
-	_ -> 
-	    io:format("unknown link attribute: ~p\n", [Kv]),
-	    link_update(L, Kvs,S)
+dispatch_command(State) when State#state.request =:= undefined ->
+    case State#state.request_queue of
+	[R=#request { call = {get,What,Fam,Flags,Attrs} } | Q ] ->
+	    R1 = update_timer(R),
+	    State1 = State#state { request_queue = Q, request = R1 },
+	    ?debug("dispatch_command: ~p", [R1]),
+	    get_command(What,Fam,Flags,Attrs,State1);
+	[R=#request { call = noop } | Q ] ->
+	    R1 = update_timer(R),
+	    State1 = State#state { request_queue = Q, request = R1 },
+	    ?debug("dispatch_command: ~p", [R1]),
+	    State1; %% let it timeout
+	[] ->
+	    State
     end;
-link_update(L, [], _S) ->
-    L.
+dispatch_command(State) ->
+    State.
 
--define(IUPDATE(I,F,V,S), 
-	(I)#interface{F=i_update((I),F,(I)#interface.F, (V),S)}).
+update_timer(R = #request { tmr = {relative,Tmo} }) 
+  when is_integer(Tmo), Tmo >= 0 ->
+    Tmr = erlang:start_timer(Tmo, self(), request_timeout),
+    R#request { tmr = Tmr };
+update_timer(R = #request { tmr = Tmr }) when is_reference(Tmr) ->
+    R.
 
-if_update(I, [Kv | Kvs], S) ->
-    case Kv of
-	{name,V} ->
-	    if_update(?IUPDATE(I,name,V,S), Kvs, S);
-	{link_name,V} ->
-	    if_update(?IUPDATE(I,link_name,V,S), Kvs, S);
-	{index,V} ->
-	    if_update(?IUPDATE(I,index,V,S), Kvs, S);
-	{inet,V={addr,_}} ->
-	    if_update(?IUPDATE(I,inet,V,S), Kvs, S);
-	{inet,V={bcast,_}} ->
-	    if_update(?IUPDATE(I,inet,V,S), Kvs, S);
-	{inet,V={mcast,_}} ->
-	    if_update(?IUPDATE(I,inet,V,S), Kvs, S);
-	{inet,V={peer,_}} ->
-	    if_update(?IUPDATE(I,inet,V,S), Kvs, S);
-	{inet,V={prefixlen,_}} ->
-	    if_update(?IUPDATE(I,inet,V,S), Kvs, S);
 
-	{inet6,V={addr,_}} ->
-	    if_update(?IUPDATE(I,inet6,V,S), Kvs, S);
-	{inet6,V={bcast,_}} ->
-	    if_update(?IUPDATE(I,inet6,V,S), Kvs, S);
-	{inet6,V={mcast,_}} ->
-	    if_update(?IUPDATE(I,inet6,V,S), Kvs, S);
-	{inet6,V={peer,_}} ->
-	    if_update(?IUPDATE(I,inet6,V,S), Kvs, S);
-	{inet6,V={prefixlen,_}} ->
-	    if_update(?IUPDATE(I,inet6,V,S), Kvs, S);
+get_command(link,Fam,Flags,Attrs,State) ->
+    Seq = State#state.o_seq,
+    Get = #getlink{family=Fam,arphrd=ether,index=0,
+		   flags=[], change=[], attributes=Attrs},
+    Hdr = #nlmsghdr { type  = getlink,
+		      flags = Flags,
+		      seq   = Seq,
+		      pid   = State#state.ospid },
+    Request = netlink_codec:encode(Hdr,Get),
+    netlink_drv:send(State#state.port, Request),
+    State#state { o_seq = (Seq+1) band 16#ffffffff };
+get_command(addr,Fam,Flags,Attrs,State) ->
+    Seq = State#state.o_seq,
+    Get   = #getaddr{family=Fam,prefixlen=0,flags=[],scope=0,
+		     index=0,attributes=Attrs},
+    Hdr = #nlmsghdr { type=getaddr,
+		      flags=Flags,
+		      seq=Seq, 
+		      pid=State#state.ospid },
+    Request = netlink_codec:encode(Hdr,Get),
+    netlink_drv:send(State#state.port, Request),
+    State#state { o_seq = (Seq+1) band 16#ffffffff}.
 
-	_ -> 
-	    io:format("unknown interface option: ~p\n", [Kv]),
-	    if_update(I, Kvs,S)
+
+handle_nlmsg(RTM=#newlink{family=_Fam,index=Index,flags=Fs,change=Cs,
+			  attributes=As}, State) ->
+    ?debug("RTM = ~p", [RTM]),
+    Name = proplists:get_value(ifname, As, ""),
+    As1 = [{index,Index},{flags,Fs},{change,Cs}|As],
+    case lists:keytake(Index, #link.index, State#state.link_list) of
+	false ->
+	    Attr = update_attrs(Name, As1, dict:new(), State#state.sub_list),
+	    L = #link { index = Index, name = Name, attr = Attr },
+	    Ls = [L|State#state.link_list],
+	    State#state { link_list = Ls };
+	{value,L,Ls} ->
+	    Attr = update_attrs(Name, As1, L#link.attr, State#state.sub_list),
+	    L1 = L#link { name = Name, attr = Attr },
+	    State#state { link_list = [L1|Ls] }
     end;
-if_update(I, [], _S) ->
-    I.
+handle_nlmsg(RTM=#dellink{family=_Fam,index=Index,flags=_Fs,change=_Cs,
+			  attributes=As}, State) ->
+    ?debug("RTM = ~p\n", [RTM]),
+    Name = proplists:get_value(ifname, As, ""),
+    %% does this delete the link?
+    case lists:keytake(Index, #link.index, State#state.link_list) of
+	false ->
+	    ?warning("Warning link index=~w not found", [Index]),
+	    State;
+	{value,L,Ls} ->
+	    As1 = dict:to_list(L#link.attr),
+	    update_attrs(Name, As1, undefined, State#state.sub_list),
+	    State#state { link_list = Ls }
+    end;
+handle_nlmsg(RTM=#newaddr { family=Fam, prefixlen=Prefixlen,
+			    flags=Flags, scope=Scope,
+			    index=Index, attributes=As },
+	     State) ->
+    ?debug("RTM = ~p", [RTM]),
+    Name = proplists:get_value(label, As, ""),
+    As1 = [{family,Fam},{prefixlen,Prefixlen},{flags,Flags},
+	   {scope,Scope},{index,Index} | As],
+    case lists:keymember(Index, #link.index, State#state.link_list) of
+	false ->
+	    ?warning("link index ~p does not exist", [Index]);
+	true ->
+	    ok
+    end,
+    case lists:keytake(Name, #addr.name, State#state.addr_list) of
+	false ->
+	    Attrs = update_attrs(Name, As1, dict:new(), State#state.sub_list),
+	    Y = #addr { name = Name, index=Index, attr=Attrs },
+	    Ys = [Y|State#state.addr_list],
+	    State#state { addr_list = Ys };
+	{value,Y,Ys} ->
+	    Attr = update_attrs(Name, As1, Y#addr.attr, State#state.sub_list),
+	    Y1 = Y#addr { index=Index, attr = Attr },
+	    State#state { addr_list = [Y1|Ys] }
+    end;
 
-i_update(_L,_Field,X,X,_S) -> %% not changed
-    X;
-i_update(I,inet,_Old,{F,V},S) ->
-    A = if I#interface.inet =:= undefined -> #address{};
-	   true -> I#interface.inet
-	end,
-    a_update(I, inet, A, F, V, S);
-i_update(I,inet6,_Old,{F,V},S) ->
-    A = if I#interface.inet6 =:= undefined -> #address{};
-	   true -> I#interface.inet6
-	end,
-    a_update(I, inet6, A, F, V, S);
-i_update(_I,index,_Old,New, _S) ->
-    New;
-i_update(_I,link_name,_Old,New, _S) ->
-    New;
-i_update(_I,name,_Old,New, _S) ->
-    New.
+handle_nlmsg(RTM=#deladdr { family=_Fam, index=_Index, attributes=As },
+	     State) ->
+    ?debug("RTM = ~p", [RTM]),
+    Name = proplists:get_value(label, As, ""),
+    case lists:keytake(Name, #addr.name, State#state.addr_list) of
+	false ->
+	    ?warning("Warning addr=~s not found", [Name]),
+	    State;
+	{value,Y,Ys} ->
+	    As1 = dict:to_list(Y#addr.attr),
+	    update_attrs(Name, As1, undefined, State#state.sub_list),
+	    State#state { addr_list = Ys }
+    end;
+handle_nlmsg(#done { }, State) ->
+    case State#state.request of
+	undefined ->
+	    dispatch_command(State);
+	#request { tmr = Tmr, from = From, reply = Reply } ->
+	    ?debug("handle_nlmsg: DONE: ~p", 
+		   [State#state.request]),
+	    erlang:cancel_timer(Tmr),
+	    gen_server:reply(From, Reply),
+	    State1 = State#state { request = undefined },
+	    dispatch_command(State1)
+    end;
+handle_nlmsg(Err=#error { errno=Err }, State) ->
+    ?debug("handle_nlmsg: ERROR: ~p", [State#state.request]),
+    case State#state.request of
+	undefined ->
+	    dispatch_command(State);
+	#request { tmr = Tmr, from = From } ->
+	    ?debug("handle_nlmsg: DONE: ~p", 
+		   [State#state.request]),
+	    erlang:cancel_timer(Tmr),
+	    %% fixme: convert errno to posix error (netlink.inc?)
+	    gen_server:reply(From, {error,Err}),
+	    State1 = State#state { request = undefined },
+	    dispatch_command(State1)
+    end;
 
-a_update(I, Fam, A, F, V, S) ->
-    Name = I#interface.name,
-    case F of
-	addr  -> 
-	    send_event(Name,{Fam,F},A#address.addr,V,S),
-	    A#address { addr = V };
-	bcast -> 
-	    send_event(Name,{Fam,F},A#address.bcast,V,S),
-	    A#address { bcast = V };
-	mcast -> 
-	    send_event(Name,{Fam,F},A#address.mcast,V,S),
-	    A#address { mcast = V };
-	peer  ->
-	    send_event(Name,{Fam,F},A#address.peer,V,S),
-	    A#address { peer = V };
-	prefixlen ->
-	    send_event(Name,{Fam,F},A#address.prefixlen,V,S),
-	    A#address { prefixlen = V }
-    end.
+handle_nlmsg(RTM, State) ->
+    ?debug("netlink: handle_nlmsg, ignore ~p", [RTM]),
+    State.
 
-
-l_update(_L,_Field,X,X,_S) -> %% not changed
-    X;
-l_update(_L,name,undefined,New,S) ->
-    io:format("found interface ~s\n", [New]),
-    send_event(New,name,undefined,New,S),
-    New;
-l_update(L,Field,undefined,New,S) ->
-    io:format("~s: ~s = ~p\n", [L#link.name,Field,New]),
-    send_event(L#link.name,Field,undefined,New,S),
-    New;
-l_update(L,flags,Old,New,S) ->
-    Added = New -- Old,
-    Removed = Old -- New,
-    io:format("~s: flags added ~p, removed ~p\n", 
-	      [L#link.name,Added,Removed]),
-    send_event(L#link.name,flags,Old,New,S),
-    New;
-l_update(L,Field,Old,New,S) ->
-    io:format("~s: ~s changed from ~p to ~p\n",
-	      [L#link.name,Field,Old,New]),
-    send_event(L#link.name,Field,Old,New,S),
-    New.
+%% update attributes form interface "Name"
+%% From to To
+update_attrs(Name, As, undefined, Subs) ->
+    lists:foreach(
+      fun({K,Vold}) ->
+	      send_event(Name,K,Vold,undefined,Subs)
+      end, As),
+    undefined;
+update_attrs(Name, As, To, Subs) ->
+    lists:foldl(
+      fun({K,Vnew},D) ->
+	      case dict:find(K,D) of
+		  error -> 
+		      send_event(Name,K,undefined,Vnew,Subs),
+		      dict:store(K,Vnew,D);
+		  {ok,Vnew} -> D;  %% already exist
+		  {ok,Vold} ->
+		      send_event(Name,K,Vold,Vnew,Subs),
+		      dict:store(K,Vnew,D)
+	      end
+      end, To, As).
 
 
 send_event(Name,Field,Old,New,[S|SList]) when 
-      S#subscription.name =:= Name; S#subscription.name =:= all ->
-    case S#subscription.fields=:=all orelse
+      S#subscription.name =:= Name; S#subscription.name =:= "" ->
+    case S#subscription.fields =:= all orelse
 	lists:member(Field,S#subscription.fields) of
 	true ->
 	    S#subscription.pid ! {netlink,S#subscription.mon,
@@ -557,124 +592,71 @@ send_event(_Name,_Field,_Old,_New,[]) ->
     ok.
 	    
 
-
-match(I,L,[{Field,Value}|Match]) when is_atom(Field) ->
-    try v_get(I,L,Field) of
-	Value -> match(I, L, Match);
+match(Y,L,[{Field,Value}|Match]) when is_atom(Field) ->
+    case find2(Field,Y,L) of
+	{ok,Value} -> match(Y, L, Match);
 	_ -> false
-    catch
-	error:_ -> false
     end;
-match(I,L,[{Op,Field,Value}|Match]) when is_atom(Op),is_atom(Field) ->
-    try v_get(I,L,Field) of
-	FValue ->
+match(Y,L,[{Op,Field,Value}|Match]) when is_atom(Op),is_atom(Field) ->
+    case find2(Y,L,Field) of
+	{ok,FValue} ->
 	    case compare(Op,FValue,Value) of
-		true ->
-		    match(I,L,Match);
-		false ->
-		    false
-	    end
-    catch
-	error:_ -> false
+		true -> match(Y,L,Match);
+		false -> false
+	    end;
+	error ->
+	    false
     end;
-match(_I, _L, []) ->
+match(_Y, _L, []) ->
     true.
 
-%% select either link attribute or interface attribute
-v_get(I,_L, inet)   -> I#interface.inet;
-v_get(I,_L, inet6)  -> I#interface.inet6;
-v_get(I,_L,{inet,F}) -> v_addr(I#interface.inet,F);
-v_get(I,_L,{inet6,F}) -> v_addr(I#interface.inet6,F);
-v_get(I,_L,link_name) -> I#interface.link_name;
-v_get(_I,false,_F) -> undefined;
-v_get(_I,L, name) -> L#link.name;
-v_get(_I,L, index) -> L#link.index;
-v_get(_I,L, mtu) -> L#link.mtu;
-v_get(_I,L, txqlen) -> L#link.txqlen;
-v_get(_I,L, flags) -> L#link.flags;
-v_get(_I,L, if_state) -> L#link.if_state;
-v_get(_I,L, if_lower_state) -> L#link.if_lower_state;
-v_get(_I,L, oper_status) -> L#link.oper_status;
-v_get(_I,L, link_mode) -> L#link.link_mode;
-v_get(_I,L, qdisc) -> L#link.qdisc;
-v_get(I, _L, F) -> v_addr(I#interface.inet,F).
-
-
-
-v_addr(undefined, _) -> undefined;
-v_addr(A, addr)  -> A#address.addr;
-v_addr(A, bcast) -> A#address.bcast;
-v_addr(A, mcast) -> A#address.mcast;
-v_addr(A, peer)  -> A#address.peer;
-v_addr(A, prefixlen) -> A#address.prefixlen.
+find2(Key,D1,D2) ->
+    case dict:find(Key,D1) of
+	error ->
+	    dict:find(Key,D2);
+	Res -> Res
+    end.
 
 
 format_link(L) ->
-    lists:zipwith(
-      fun(K,Vi) ->
-	      [atom_to_list(K), " ",l_format(K, element(Vi,L)),";"]
-      end,
-      record_info(fields, link),
-      lists:seq(2, tuple_size(L))).
+    dict:fold(
+      fun(af_spec,_V,A) -> A;
+	 (map,_V,A) -> A;
+	 (stats,_V,A) -> A;
+	 (stats64,_V,A) -> A;
+	 (change,_V,A) -> A;
+	 (K,V,A) ->
+	      [["\n    ",name_to_list(K), " ",value_to_list(K,V),";"]|A]
+      end, [], L#link.attr).
 
-format_interface(I) ->
-    lists:zipwith(
-      fun(K,Vi) ->
-	      [atom_to_list(K), " ",i_format(K, element(Vi,I)),";"]
-      end,
-      record_info(fields, interface),
-      lists:seq(2, tuple_size(I))).
+format_addr(Y) ->
+    dict:fold(
+      fun(K,V,A) ->
+	      [["\n    ",name_to_list(K), " ",value_to_list(K,V),";"]|A]
+      end, [], Y#addr.attr).
 
-format_address(_F,undefined) ->
-    "";
-format_address(F,A) ->
-    lists:zipwith(
-      fun(K,Vi) ->
-	      [atom_to_list(K), " ",a_format(F,K,element(Vi,A)),";"]
-      end,
-      record_info(fields, address),
-      lists:seq(2, tuple_size(A))).
-    
-
-l_format(name, V) -> io_lib:format("~s", [V]);
-l_format(oper_status,V) -> io_lib:format("~s", [V]);
-l_format(link_mode,V) -> io_lib:format("~s", [V]);
-l_format(qdisc,V) -> io_lib:format("~s", [V]);
-l_format(addr,V) ->  format_addr(eth, V);
-l_format(bcast,V) -> format_addr(eth, V);
-l_format(_, V) -> io_lib:format("~w", [V]).
-
-i_format(name, V)       -> io_lib:format("~s", [V]);
-i_format(link_name, V)  -> io_lib:format("~s", [V]);
-i_format(index, V)      -> io_lib:format("~w", [V]);
-i_format(inet, V)       -> format_address(inet,V);
-i_format(inet6, V)      -> format_address(inet6,V);
-i_format(_, V) -> io_lib:format("~w", [V]).
-    
-a_format(F,addr,V)  -> format_addr(F, {addr,V});
-a_format(F,bcast,V) -> format_addr(F, {bcast,V});
-a_format(F,mcast,V) -> format_addr(F, {mcast,V});
-a_format(F,peer,V) -> format_addr(F, {peer,V});
-a_format(_F,prefixlen,V) -> io_lib:format("~w", [V]);
-a_format(_F,_K,V) -> io_lib:format("~w", [V]).
-    
-
-format_addr(_, undefined) -> "";
-format_addr(eth, Addr) when is_tuple(Addr), tuple_size(Addr) =:= 6 ->
-    io_lib:format("~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:",
-		  tuple_to_list(Addr));
-format_addr(_Fam, {_,undefined}) -> "";
-format_addr(_Fam, {addr,A}) ->
-    ["addr ", inet_parse:ntoa(A)];
-format_addr(_Fam, {bcast,A}) ->
-    ["bcast ", inet_parse:ntoa(A)];
-format_addr(_Fam, {mcast,A}) ->
-    ["mcast ", inet_parse:ntoa(A)];
-format_addr(_Fam, {peer,A}) ->
-    ["peer ", inet_parse:ntoa(A)].
+name_to_list(K) when is_atom(K) ->
+    atom_to_list(K);
+name_to_list(K) when is_integer(K) ->
+    integer_to_list(K).
 
 
-    
+value_to_list(local,V)     -> format_a(V);
+value_to_list(address,V)   -> format_a(V);
+value_to_list(broadcast,V) -> format_a(V);
+value_to_list(multicast,V) -> format_a(V);
+value_to_list(anycast,V)   -> format_a(V);
+value_to_list(_, V) -> io_lib:format("~p", [V]).
+
+format_a(undefined) -> "";
+format_a(A) when is_tuple(A), tuple_size(A) =:= 6 ->
+    io_lib:format("~2.16.0b:~2.16.0b:~2.16.0b:~2.16.0b:~2.16.0b:~2.16.0b",
+		  tuple_to_list(A));
+format_a(A) when is_tuple(A), tuple_size(A) =:= 4 ->
+    inet_parse:ntoa(A);
+format_a(A) when is_tuple(A), tuple_size(A) =:= 8 ->
+    inet_parse:ntoa(A).
+
 compare('==',A,B) -> A == B;
 compare('=:=',A,B) -> A =:= B;
 compare('<' ,A,B) -> A < B;

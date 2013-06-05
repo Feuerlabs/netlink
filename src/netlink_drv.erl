@@ -14,33 +14,38 @@
 %%% Created : 30 Nov 2011 by Tony Rogvall <tony@rogvall.se>
 
 -module(netlink_drv).
--export([open/0]).
--export([connect/1, disconnect/1, refresh/1]).
--export([activate/1, activate/2, deactivate/1]).
+-export([open/1, close/1]).
+-export([send/2]).
+-export([add_membership/2, drop_membership/2,
+	 deactivate/1, activate/1, activate/2,
+	 debug/2]).
 
-%% short cut - deugging
--export([start/0]).
+%% deugging
+-compile(export_all).
 
--define(NL_CMD_CONNECT,     1).
--define(NL_CMD_DISCONNECT,  2).
--define(NL_CMD_ACTIVATE,    3).
--define(NL_CMD_REFRESH,     4).
+-include("netlink.hrl").
 
--define(NL_REP_OK,     0).
--define(NL_REP_ERROR,  1).
+-define(CMD_ADD_MEMBERSHIP,   1).
+-define(CMD_DROP_MEMBERSHIP,  2).
+-define(CMD_ACTIVE,           3).
+-define(CMD_DEBUG,            4).
 
-start() ->
-    Port = open(),
-    connect(Port),
-    activate(Port),
-    refresh(Port),
-    Port.
+-define(DLOG_DEBUG,     7).
+-define(DLOG_INFO,      6).
+-define(DLOG_NOTICE,    5).
+-define(DLOG_WARNING,   4).
+-define(DLOG_ERROR,     3).
+-define(DLOG_CRITICAL,  2).
+-define(DLOG_ALERT,     1).
+-define(DLOG_EMERGENCY, 0).
+-define(DLOG_NONE,     -1).
 
-connect(Port) ->
-    do_reply(erlang:port_control(Port, ?NL_CMD_CONNECT, [])).
 
-disconnect(Port) ->
-    do_reply(erlang:port_control(Port, ?NL_CMD_DISCONNECT, [])).    
+add_membership(Port,Msg) when is_integer(Msg) ->
+    port_call(Port, ?CMD_ADD_MEMBERSHIP, <<Msg:32>>).
+
+drop_membership(Port,Msg) when is_integer(Msg) ->
+    port_call(Port, ?CMD_DROP_MEMBERSHIP, <<Msg:32>>).
 
 deactivate(Port) ->
     activate(Port, 0).    
@@ -48,29 +53,56 @@ deactivate(Port) ->
 activate(Port) ->
     activate(Port, -1).
 
-activate(Port, N) when is_integer(N), N >= -1, N < 16#ffff ->
-    do_reply(erlang:port_control(Port, ?NL_CMD_ACTIVATE, <<N:16>>)).
+activate(Port, N) when is_integer(N), N >= -1, N < 16#7fffffff ->
+    port_call(Port, ?CMD_ACTIVE, <<N:32>>).
 
-refresh(Port) ->
-    do_reply(erlang:port_control(Port, ?NL_CMD_REFRESH, [])).
+debug(Port,Level) when is_atom(Level) ->
+    L = level(Level),
+    port_call(Port, ?CMD_DEBUG, <<L:32>>).
 
-open() ->
+
+open(Protocol) when is_integer(Protocol), Protocol >= 0 ->
     Driver = "netlink_drv",
     Path = code:priv_dir(netlink),
     io:format("load_driver '~s' from: '~s'\n", [Driver, Path]),
     case erl_ddll:load_driver(Path, Driver) of
 	ok ->
-	    erlang:open_port({spawn_driver, Driver}, [binary]);
+	    Arg = integer_to_list(Protocol),
+	    erlang:open_port({spawn_driver, Driver++" "++Arg}, [binary]);
 	{error,Error} ->
 	    io:format("Error: ~s\n", [erl_ddll:format_error_int(Error)]),
 	    erlang:error(Error)
     end.
 
-do_reply([?NL_REP_OK]) ->
-    ok;
-do_reply([?NL_REP_ERROR | Err]) ->
-    {error, list_to_atom(Err)}.
+close(Port) ->
+    erlang:port_close(Port).
 
-    
+send(Port, Command) ->
+    erlang:port_command(Port, Command).
 
+port_call(Port, Cmd, Data) ->
+    case erlang:port_control(Port, Cmd, Data) of
+	<<0>> ->
+	    ok;
+	<<255,E/binary>> -> 
+	    {error, erlang:binary_to_atom(E, latin1)};
+	<<254,E/binary>> -> 
+	    {error, binary_to_list(E)};
+	<<1,Y>> -> {ok,Y};
+	<<2,Y:16/native-unsigned>> -> {ok, Y};
+	<<4,Y:32/native-unsigned>> -> {ok, Y};
+	<<8,A:32/native-unsigned,B:32/native-unsigned>> -> {ok,A,B};
+	<<3,Return/binary>> -> {ok,Return}
+    end.    
 	
+%% convert symbolic to numeric level
+level(debug) -> ?DLOG_DEBUG;
+level(info)  -> ?DLOG_INFO;
+level(notice) -> ?DLOG_NOTICE;
+level(warning) -> ?DLOG_WARNING;
+level(error) -> ?DLOG_ERROR;
+level(critical) -> ?DLOG_CRITICAL;
+level(alert) -> ?DLOG_ALERT;
+level(emergency) -> ?DLOG_EMERGENCY;
+level(none) -> ?DLOG_NONE.
+
