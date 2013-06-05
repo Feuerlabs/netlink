@@ -860,7 +860,7 @@
  [
   {unspec,    binary_t},
   {address,   addr_t},
-  {cacheinfo, {array,uint32_t}}
+  {cacheinfo, {array,uint32_t}}  %% fixme: add struct rta_cacheinfo
  ]}.
 
 {enum, ifa_flags,
@@ -900,12 +900,12 @@
 
 {record, ifinfomsg,
  [
-  {family,     {enum,uint8_t,family}},
-  {'_',        uint8_t},
-  {arphrd,     {enum,uint16_t,arphrd}},
-  {index,      int32_t},
-  {flags,      {flags,uint32_t,iff_flags}},
-  {change,     {flags,uint32_t,iff_flags}},
+  {family,     {enum,uchar_t,family}},
+  {'_',        uchar_t},
+  {arphrd,     {enum,ushort_t,arphrd}},
+  {index,      int_t},
+  {flags,      {flags,uint_t,iff_flags}},
+  {change,     {flags,uint_t,iff_flags}},
   {attributes, {tlvs,rtnetlink_link}}
  ]}.
 
@@ -915,15 +915,15 @@
 
 {record, rtmsg,
  [
-  {family,     {enum,uint8_t,family}},
-  {dstlen,     uint8_t},
-  {srclen,     uint8_t},
-  {tos,        uint8_t},
-  {table,      uint8_t},  %% routing table id
-  {protocol,   {enum,uint8_t,protocol}},
-  {scope,      uint8_t},
-  {rtm_type,   uint8_t},
-  {flags,      uint32_t},
+  {family,     {enum,uchar_t,family}},
+  {dstlen,     uchar_t},
+  {srclen,     uchar_t},
+  {tos,        uchar_t},
+  {table,      uchar_t},  %% routing table id
+  {protocol,   {enum,uchar_t,protocol}},
+  {scope,      uchar_t},
+  {rtm_type,   uchar_t},
+  {flags,      uint_t},
   {attributes, {tlvs, rtnetlink_route}}
  ]}.
 
@@ -964,17 +964,17 @@
 
 {record, error, 
  [
-  {errno,  int32_t},
+  {errno,  int_t},
   {msg,    nlmsghdr},  %% the original header
   {data,   binary_t}   %% truncated data?
  ]}.
 
 {record, done,
  [
-  {status, uint32_t}  %% ?
+  {status, uint32_t}  %% ? int_t?
  ]}.
 
 {record, overrun, 
  [
-  {status, uint32_t}  %% ?
+  {status, uint32_t}  %% ? int_t?
  ]}.

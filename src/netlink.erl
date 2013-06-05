@@ -68,6 +68,9 @@
 	  fields=all :: all | [if_field()]
 	}).
 
+-define(MIN_RCVBUF,  (128*1024)).
+-define(MIN_SNDBUF,  (32*1024)).
+
 -define(REQUEST_TMO, 2000).
 
 -record(request,
@@ -175,12 +178,23 @@ init([]) ->
     OsPid = list_to_integer(os:getpid()),
     I_Seq = O_Seq = 1234, %% element(2,now()),
     Port = netlink_drv:open(?NETLINK_ROUTE),
+
     %% netlink_drv:debug(Port, debug),
-    netlink_drv:add_membership(Port, ?RTNLGRP_LINK),
-    netlink_drv:add_membership(Port, ?RTNLGRP_IPV4_IFADDR),
+
+    {ok,Rcvbuf} = update_rcvbuf(Port, ?MIN_RCVBUF),
+    {ok,Sndbuf} = update_sndbuf(Port, ?MIN_SNDBUF),
+
+    ?info("Rcvbuf: ~w, Sndbuf: ~w", [Rcvbuf, Sndbuf]),
+
+    {ok,Sizes} = netlink_drv:get_sizeof(Port),
+    ?info("Sizes: ~w", [Sizes]),
+
+    ok = netlink_drv:add_membership(Port, ?RTNLGRP_LINK),
+    ok = netlink_drv:add_membership(Port, ?RTNLGRP_IPV4_IFADDR),
+
     netlink_drv:activate(Port),
     %% init sequence to fill the cache
-    T0 = erlang:start_timer(1000, self(), request_timeout),
+    T0 = erlang:start_timer(200, self(), request_timeout),
     R0 = #request { tmr  = T0, 
 		    call = noop, 
 		    from = {self(),make_ref()} 
@@ -427,6 +441,26 @@ update_timer(R = #request { tmr = {relative,Tmo} })
 update_timer(R = #request { tmr = Tmr }) when is_reference(Tmr) ->
     R.
 
+update_sndbuf(Port, Min) ->
+    case netlink_drv:get_sndbuf(Port) of
+	{ok,Size} when Size >= Min ->
+	    {ok,Size};
+	{ok,_Size} ->
+	    netlink_drv:set_sndbuf(Port, Min),
+	    netlink_drv:get_sndbuf(Port);
+	Err -> Err
+    end.
+
+
+update_rcvbuf(Port, Min) ->
+    case netlink_drv:get_rcvbuf(Port) of
+	{ok,Size} when Size >= Min ->
+	    {ok,Size};
+	{ok,_Size} ->
+	    netlink_drv:set_rcvbuf(Port, Min),
+	    netlink_drv:get_rcvbuf(Port);
+	Err -> Err
+    end.
 
 get_command(link,Fam,Flags,Attrs,State) ->
     Seq = State#state.o_seq,
@@ -450,7 +484,6 @@ get_command(addr,Fam,Flags,Attrs,State) ->
     Request = netlink_codec:encode(Hdr,Get),
     netlink_drv:send(State#state.port, Request),
     State#state { o_seq = (Seq+1) band 16#ffffffff}.
-
 
 handle_nlmsg(RTM=#newlink{family=_Fam,index=Index,flags=Fs,change=Cs,
 			  attributes=As}, State) ->
