@@ -25,7 +25,7 @@
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2, code_change/3]).
--export([i/0, list/1, select/1]).
+-export([i/0, list/1]).
 -export([subscribe/1, subscribe/2, subscribe/3]).
 -export([unsubscribe/1]).
 -export([get_root/2, get_match/3, get/4]).
@@ -41,6 +41,15 @@
 -type if_link_field() :: name | index | mtu | txqlen | flags | 
 			 operstate | qdisc | address | broadcast.
 
+-type uint8_t() :: 0..16#ff.
+-type uint16_t() :: 0..16#ffff.
+
+-type ipv4_addr() :: {uint8_t(),uint8_t(),uint8_t(),uint8_t()}.
+-type ipv6_addr() :: {uint16_t(),uint16_t(),uint16_t(),uint16_t(),
+		      uint16_t(),uint16_t(),uint16_t(),uint16_t()}.
+
+-type if_addr() :: ipv4_addr() | ipv6_addr().
+
 -type if_field() :: if_link_field() | if_addr_field().
 
 -type if_name() :: string().
@@ -48,16 +57,17 @@
 
 -record(link,
 	{
-	  name     :: if_name(),          %% interface label or ""
+	  name     :: if_name(),          %% interface name
 	  index    :: non_neg_integer(),  %% interface index
 	  attr     :: dict()              %% attributes {atom(),term}
 	}).
 
 -record(addr,
 	{
-	  name     :: if_name(),  %% "virtual" name
+	  addr     :: if_addr(),          %% the address
+	  name     :: if_name(),          %% interface label
 	  index    :: non_neg_integer(),  %% interface index
-	  attr     :: dict()      %% attributes
+	  attr     :: dict()              %% attributes
 	}).
 
 -record(subscription,
@@ -110,9 +120,6 @@ i() ->
 
 stop() ->
     gen_server:call(?SERVER, stop).
-
-select(Match) ->
-    gen_server:call(?SERVER, {select,Match}).
 
 list(Match) ->
     gen_server:call(?SERVER, {list,Match}).
@@ -195,6 +202,7 @@ init([Opts]) ->
 
     ok = netlink_drv:add_membership(Port, ?RTNLGRP_LINK),
     ok = netlink_drv:add_membership(Port, ?RTNLGRP_IPV4_IFADDR),
+    ok = netlink_drv:add_membership(Port, ?RTNLGRP_IPV6_IFADDR),
 
     netlink_drv:activate(Port),
     %% init sequence to fill the cache
@@ -243,28 +251,20 @@ init([Opts]) ->
 %%--------------------------------------------------------------------
 handle_call({list,Match}, _From, State) ->
     lists:foreach(
-      fun(Y) ->
-	      L = lists:keyfind(Y#addr.index, 
-				#link.index, State#state.link_list),
-	      case match(Y#addr.attr,L#link.attr,Match) of
+      fun(L) ->
+	      %% select addresses that belong to link L
+	      Ys = [Y || Y <- State#state.addr_list, 
+			 Y#addr.index =:= L#link.index],
+	      FYs = [format_addr(Y) || Y <- Ys ],
+	      case match(L#link.attr,dict:new(),Match) of
 		  true ->
-		      io:format("interface {~s~s}\n",
-				[format_addr(Y),format_link(L)]);
+		      io:format("link {~s~s}\n",
+				[FYs,format_link(L)]);
 		  false ->
 		      ok
 	      end
-      end, State#state.addr_list),
+      end, State#state.link_list),
     {reply, ok, State};
-handle_call({match,Match}, _From, State) ->
-    IfList = 
-	lists:filter(
-	  fun(Y) -> 
-		  L = lists:keyfind(Y#addr.index, 
-				    #link.index, State#state.link_list),
-		  match(Y,L,Match)
-	  end, 
-	  State#state.addr_list),
-    {reply, IfList, State};
 handle_call({subscribe, Pid, Name, Options, Fs}, _From, State) ->
     Mon = erlang:monitor(process, Pid),
     S = #subscription { pid=Pid, mon=Mon, name=Name, fields=Fs },
@@ -331,6 +331,8 @@ handle_cast(_Msg, State) ->
 handle_info(_Info={nl_data,Port,Data},State) when Port =:= State#state.port ->
     try netlink_codec:decode(Data,[]) of
 	MsgList ->
+	    %% FIXME: the messages should be delivered one by one from
+	    %% the driver so the decoding could simplified.
 	    State1 = 
 		lists:foldl(
 		  fun(Msg,StateI) ->
@@ -524,6 +526,7 @@ handle_nlmsg(RTM=#newaddr { family=Fam, prefixlen=Prefixlen,
 			    index=Index, attributes=As },
 	     State) ->
     ?debug("RTM = ~p", [RTM]),
+    Addr = proplists:get_value(address, As, {}),
     Name = proplists:get_value(label, As, ""),
     As1 = [{family,Fam},{prefixlen,Prefixlen},{flags,Flags},
 	   {scope,Scope},{index,Index} | As],
@@ -533,25 +536,26 @@ handle_nlmsg(RTM=#newaddr { family=Fam, prefixlen=Prefixlen,
 	true ->
 	    ok
     end,
-    case lists:keytake(Name, #addr.name, State#state.addr_list) of
+    case lists:keytake(Addr, #addr.addr, State#state.addr_list) of
 	false ->
 	    Attrs = update_attrs(Name, As1, dict:new(), State#state.sub_list),
-	    Y = #addr { name = Name, index=Index, attr=Attrs },
+	    Y = #addr { addr=Addr, name = Name, index=Index, attr=Attrs },
 	    Ys = [Y|State#state.addr_list],
 	    State#state { addr_list = Ys };
 	{value,Y,Ys} ->
 	    Attr = update_attrs(Name, As1, Y#addr.attr, State#state.sub_list),
-	    Y1 = Y#addr { index=Index, attr = Attr },
+	    Y1 = Y#addr { index=Index, name=Name, attr = Attr },
 	    State#state { addr_list = [Y1|Ys] }
     end;
 
 handle_nlmsg(RTM=#deladdr { family=_Fam, index=_Index, attributes=As },
 	     State) ->
     ?debug("RTM = ~p", [RTM]),
+    Addr = proplists:get_value(address, As, {}),
     Name = proplists:get_value(label, As, ""),
-    case lists:keytake(Name, #addr.name, State#state.addr_list) of
+    case lists:keytake(Addr, #addr.addr, State#state.addr_list) of
 	false ->
-	    ?warning("Warning addr=~s not found", [Name]),
+	    ?warning("Warning addr=~s not found", [Addr]),
 	    State;
 	{value,Y,Ys} ->
 	    As1 = dict:to_list(Y#addr.attr),
@@ -667,10 +671,12 @@ format_link(L) ->
       end, [], L#link.attr).
 
 format_addr(Y) ->
-    dict:fold(
-      fun(K,V,A) ->
-	      [["\n    ",name_to_list(K), " ",value_to_list(K,V),";"]|A]
-      end, [], Y#addr.attr).
+    ["\n", "    addr {",
+     dict:fold(
+       fun(cacheinfo,_V,A) -> A;
+	  (K,V,A) ->
+	       [[" ",name_to_list(K), " ",value_to_list(K,V),";"]|A]
+       end, [], Y#addr.attr), "}"].
 
 name_to_list(K) when is_atom(K) ->
     atom_to_list(K);

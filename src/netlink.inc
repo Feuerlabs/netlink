@@ -767,6 +767,7 @@
   {irq,       uint16_t},
   {dma,       uint8_t},
   {port,      uint8_t}
+  %% fixme: 64 padding? on 64 bit machine?
  ]}.
 
 {attribute, rtnetlink_route, 
