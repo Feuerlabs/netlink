@@ -19,8 +19,8 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0]).
--export([start/0, stop/0]).
+-export([start_link/0, start_link/1]).
+-export([start/0, start/1, stop/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -101,7 +101,9 @@
 
 %% debug & test
 start() ->
-    gen_server:start({local, ?SERVER}, ?MODULE, [], []).
+    start([]).
+start(Opts) ->
+    gen_server:start({local, ?SERVER}, ?MODULE, [Opts], []).
 
 i() ->
     gen_server:call(?SERVER, {list,[]}).
@@ -157,7 +159,9 @@ get(What,Fam,GetFlags,GetAttrs) ->
 %% @end
 %%--------------------------------------------------------------------
 start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+    start_link([]).
+start_link(Opts) ->
+    gen_server:start_link({local, ?SERVER}, ?MODULE, [Opts], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -174,12 +178,12 @@ start_link() ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([]) ->
+init([Opts]) ->
     OsPid = list_to_integer(os:getpid()),
     I_Seq = O_Seq = 1234, %% element(2,now()),
     Port = netlink_drv:open(?NETLINK_ROUTE),
 
-    %% netlink_drv:debug(Port, debug),
+    netlink_drv:debug(Port, proplists:get_value(debug,Opts,none)),
 
     {ok,Rcvbuf} = update_rcvbuf(Port, ?MIN_RCVBUF),
     {ok,Sndbuf} = update_sndbuf(Port, ?MIN_SNDBUF),

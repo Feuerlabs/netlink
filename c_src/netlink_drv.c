@@ -325,7 +325,9 @@ static void nl_drv_output(ErlDrvData d, char* buf,ErlDrvSizeT len)
 	    struct iovec iov;
 	    struct msghdr msg;
 
+	    memset(&msg, 0, sizeof(msg));
 	    memset(&dest_addr, 0, sizeof(dest_addr));
+
 	    dest_addr.nl_family = AF_NETLINK;
 	    dest_addr.nl_pid = 0;    // to kernel
 	    dest_addr.nl_groups = 0; // unicast
@@ -442,8 +444,10 @@ static void nl_drv_ready_output(ErlDrvData d, ErlDrvEvent event)
 	return;
     }
     vsize = vsize > MAX_VSIZE ? MAX_VSIZE : vsize;
-    
+
+    memset(&msg, 0, sizeof(msg));
     memset(&dest_addr, 0, sizeof(dest_addr));
+
     dest_addr.nl_family = AF_NETLINK;
     dest_addr.nl_pid = 0;    // to kernel
     dest_addr.nl_groups = 0; // unicast    

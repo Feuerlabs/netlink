@@ -121,6 +121,8 @@ port_call(Port, Cmd, Data) ->
     end.
 	
 %% convert symbolic to numeric level
+level(true)  -> ?DLOG_DEBUG;
+level(false) -> ?DLOG_NONE;
 level(debug) -> ?DLOG_DEBUG;
 level(info)  -> ?DLOG_INFO;
 level(notice) -> ?DLOG_NOTICE;
