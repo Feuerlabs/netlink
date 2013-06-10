@@ -258,12 +258,12 @@ handle_call({subscribe, Pid, Name, Options, Fs}, _From, State) ->
 	    lists:foreach(
 	      fun(L) ->
 		      As = dict:to_list(L#link.attr),
-		      update_attrs(L#link.name, As, dict:new(), [S])
+		      update_attrs(L#link.name, link, As, dict:new(), [S])
 	      end, State#state.link_list),
 	    lists:foreach(
 	      fun(Y) ->
 		      As = dict:to_list(Y#addr.attr),
-		      update_attrs(Y#addr.name, As, dict:new(), [S])
+		      update_attrs(Y#addr.name, addr, As, dict:new(), [S])
 	      end, State#state.addr_list),
 	    {reply, {ok,Mon}, State#state { sub_list = SList }}
     end;
@@ -459,12 +459,12 @@ handle_nlmsg(RTM=#newlink{family=_Fam,index=Index,flags=Fs,change=Cs,
     As1 = [{index,Index},{flags,Fs},{change,Cs}|As],
     case lists:keytake(Index, #link.index, State#state.link_list) of
 	false ->
-	    Attr = update_attrs(Name, As1, dict:new(), State#state.sub_list),
+	    Attr = update_attrs(Name, link, As1, dict:new(), State#state.sub_list),
 	    L = #link { index = Index, name = Name, attr = Attr },
 	    Ls = [L|State#state.link_list],
 	    State#state { link_list = Ls };
 	{value,L,Ls} ->
-	    Attr = update_attrs(Name, As1, L#link.attr, State#state.sub_list),
+	    Attr = update_attrs(Name, link, As1, L#link.attr, State#state.sub_list),
 	    L1 = L#link { name = Name, attr = Attr },
 	    State#state { link_list = [L1|Ls] }
     end;
@@ -479,7 +479,7 @@ handle_nlmsg(RTM=#dellink{family=_Fam,index=Index,flags=_Fs,change=_Cs,
 	    State;
 	{value,L,Ls} ->
 	    As1 = dict:to_list(L#link.attr),
-	    update_attrs(Name, As1, undefined, State#state.sub_list),
+	    update_attrs(Name, link, As1, undefined, State#state.sub_list),
 	    State#state { link_list = Ls }
     end;
 handle_nlmsg(RTM=#newaddr { family=Fam, prefixlen=Prefixlen,
@@ -498,12 +498,12 @@ handle_nlmsg(RTM=#newaddr { family=Fam, prefixlen=Prefixlen,
     end,
     case lists:keytake(Name, #addr.name, State#state.addr_list) of
 	false ->
-	    Attrs = update_attrs(Name, As1, dict:new(), State#state.sub_list),
+	    Attrs = update_attrs(Name, addr, As1, dict:new(), State#state.sub_list),
 	    Y = #addr { name = Name, index=Index, attr=Attrs },
 	    Ys = [Y|State#state.addr_list],
 	    State#state { addr_list = Ys };
 	{value,Y,Ys} ->
-	    Attr = update_attrs(Name, As1, Y#addr.attr, State#state.sub_list),
+	    Attr = update_attrs(Name, addr, As1, Y#addr.attr, State#state.sub_list),
 	    Y1 = Y#addr { index=Index, attr = Attr },
 	    State#state { addr_list = [Y1|Ys] }
     end;
@@ -518,7 +518,7 @@ handle_nlmsg(RTM=#deladdr { family=_Fam, index=_Index, attributes=As },
 	    State;
 	{value,Y,Ys} ->
 	    As1 = dict:to_list(Y#addr.attr),
-	    update_attrs(Name, As1, undefined, State#state.sub_list),
+	    update_attrs(Name, addr, As1, undefined, State#state.sub_list),
 	    State#state { addr_list = Ys }
     end;
 handle_nlmsg(#done { }, State) ->
@@ -553,42 +553,44 @@ handle_nlmsg(RTM, State) ->
     State.
 
 %% update attributes form interface "Name"
-%% From to To
-update_attrs(Name, As, undefined, Subs) ->
+%% From to To Type is either link | addr
+update_attrs(Name,Type,As,undefined,Subs) ->
     lists:foreach(
       fun({K,Vold}) ->
-	      send_event(Name,K,Vold,undefined,Subs)
+	      send_event(Name,Type,K,Vold,undefined,Subs)
       end, As),
     undefined;
-update_attrs(Name, As, To, Subs) ->
+update_attrs(Name,Type,As,To,Subs) ->
     lists:foldl(
       fun({K,Vnew},D) ->
 	      case dict:find(K,D) of
 		  error -> 
-		      send_event(Name,K,undefined,Vnew,Subs),
+		      send_event(Name,Type,K,undefined,Vnew,Subs),
 		      dict:store(K,Vnew,D);
 		  {ok,Vnew} -> D;  %% already exist
 		  {ok,Vold} ->
-		      send_event(Name,K,Vold,Vnew,Subs),
+		      send_event(Name,Type,K,Vold,Vnew,Subs),
 		      dict:store(K,Vnew,D)
 	      end
       end, To, As).
 
 
-send_event(Name,Field,Old,New,[S|SList]) when 
+send_event(Name,Type,Field,Old,New,[S|SList]) when 
       S#subscription.name =:= Name; S#subscription.name =:= "" ->
     case S#subscription.fields =:= all orelse
-	lists:member(Field,S#subscription.fields) of
+	S#subscription.fields =:= Type orelse 
+	lists:member(Field,S#subscription.fields) orelse
+	lists:member({Type,Field},S#subscription.fields) of
 	true ->
 	    S#subscription.pid ! {netlink,S#subscription.mon,
 				  Name,Field,Old,New},
-	    send_event(Name,Field,Old,New,SList);
+	    send_event(Name,Type,Field,Old,New,SList);
 	false ->
-	    send_event(Name,Field,Old,New,SList)
+	    send_event(Name,Type,Field,Old,New,SList)
     end;
-send_event(Name,Field,Old,New,[_|SList]) ->
-    send_event(Name,Field,Old,New,SList);
-send_event(_Name,_Field,_Old,_New,[]) ->
+send_event(Name,Type,Field,Old,New,[_|SList]) ->
+    send_event(Name,Type,Field,Old,New,SList);
+send_event(_Name,_Type,_Field,_Old,_New,[]) ->
     ok.
 	    
 
