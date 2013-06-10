@@ -50,7 +50,8 @@
 
 -type if_addr() :: ipv4_addr() | ipv6_addr().
 
--type if_field() :: if_link_field() | if_addr_field().
+-type if_field() :: if_link_field() | if_addr_field() |
+		    {link,if_link_field()} | {addr,if_addr_field()}.
 
 -type if_name() :: string().
 
@@ -75,7 +76,7 @@
 	  pid  :: pid(),               %% subscriber
 	  mon  :: reference(),         %% monitor
 	  name :: string(),            %% name
-	  fields=all :: all | [if_field()]
+	  fields=all :: all | addr | link | [if_field()]
 	}).
 
 -define(MIN_RCVBUF,  (128*1024)).
