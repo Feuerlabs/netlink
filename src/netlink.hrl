@@ -24,38 +24,38 @@
 -define(NETLINK_CRYPTO,		21).	%% Crypto layer */
 -define(NETLINK_INET_DIAG,	?NETLINK_SOCK_DIAG).
 
--define(NFNLGRP_NONE, 0).
--define(NFNLGRP_CONNTRACK_NEW, 1).
--define(NFNLGRP_CONNTRACK_UPDATE, 2).
--define(NFNLGRP_CONNTRACK_DESTROY, 3).
--define(NFNLGRP_CONNTRACK_EXP_NEW, 4).
--define(NFNLGRP_CONNTRACK_EXP_UPDATE, 5).
+-define(NFNLGRP_NONE,                  0).
+-define(NFNLGRP_CONNTRACK_NEW,         1).
+-define(NFNLGRP_CONNTRACK_UPDATE,      2).
+-define(NFNLGRP_CONNTRACK_DESTROY,     3).
+-define(NFNLGRP_CONNTRACK_EXP_NEW,     4).
+-define(NFNLGRP_CONNTRACK_EXP_UPDATE,  5).
 -define(NFNLGRP_CONNTRACK_EXP_DESTROY, 6).
 
-
--define(RTNLGRP_NONE, 0).
--define(RTNLGRP_LINK, 1).
--define(RTNLGRP_NOTIFY, 2).
--define(RTNLGRP_NEIGH, 3).
--define(RTNLGRP_TC, 4).
--define(RTNLGRP_IPV4_IFADDR, 4).
--define(RTNLGRP_IPV4_MROUTE, 5).
--define(RTNLGRP_IPV4_ROUTE, 6).
--define(RTNLGRP_IPV4_RULE, 7).
--define(RTNLGRP_IPV6_IFADDR, 8).
--define(RTNLGRP_IPV6_MROUTE, 9).
--define(RTNLGRP_IPV6_ROUTE, 10).
--define(RTNLGRP_IPV6_IFINFO, 11).
--define(RTNLGRP_DECnet_IFADDR, 12).
--define(RTNLGRP_NOP2,13).
--define(RTNLGRP_DECnet_ROUTE, 14).
--define(RTNLGRP_DECnet_RULE, 15).
--define(RTNLGRP_NOP4, 16).
--define(RTNLGRP_IPV6_PREFIX, 17).
--define(RTNLGRP_IPV6_RULE, 18).
--define(RTNLGRP_ND_USEROPT, 19).
--define(RTNLGRP_PHONET_IFADDR, 20).
--define(RTNLGRP_PHONET_ROUTE, 21).
+-define(RTNLGRP_NONE,          0).
+-define(RTNLGRP_LINK,          1).
+-define(RTNLGRP_NOTIFY,        2).
+-define(RTNLGRP_NEIGH,         3).
+-define(RTNLGRP_TC,            4).
+-define(RTNLGRP_IPV4_IFADDR,   5).
+-define(RTNLGRP_IPV4_MROUTE,   6).
+-define(RTNLGRP_IPV4_ROUTE,    7).
+-define(RTNLGRP_IPV4_RULE,     8).
+-define(RTNLGRP_IPV6_IFADDR,   9).
+-define(RTNLGRP_IPV6_MROUTE,   10).
+-define(RTNLGRP_IPV6_ROUTE,    11).
+-define(RTNLGRP_IPV6_IFINFO,   12).
+-define(RTNLGRP_DECnet_IFADDR, 13).
+-define(RTNLGRP_NOP2,          14).
+-define(RTNLGRP_DECnet_ROUTE,  15).
+-define(RTNLGRP_DECnet_RULE,   16).
+-define(RTNLGRP_NOP4,          17).
+-define(RTNLGRP_IPV6_PREFIX,   18).
+-define(RTNLGRP_IPV6_RULE,     19).
+-define(RTNLGRP_ND_USEROPT,    20).
+-define(RTNLGRP_PHONET_IFADDR, 21).
+-define(RTNLGRP_PHONET_ROUTE,  22).
+-define(RTNLGRL_DCB,           23).
 
 -record(nlmsg,
 	{

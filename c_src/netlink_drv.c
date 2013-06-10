@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <asm/types.h>
 #include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 
 #include "erl_driver.h"
 
@@ -47,8 +48,9 @@ typedef struct _nl_ctx_t {
     ErlDrvEvent      fd;       // netlink socket
     int              protocol;  // netlink protocol
     int              active;    
-    int         is_selecting;
-    struct nlmsghdr* nlbuf;
+    int              is_selecting;
+    int              is_sending;
+    void*            nlbuf;
     size_t           nlbuf_len;
 } nl_ctx_t;
 
@@ -56,6 +58,25 @@ typedef struct _nl_ctx_t {
 #define CMD_DROP_MEMBERSHIP   2
 #define CMD_ACTIVE            3
 #define CMD_DEBUG             4
+#define CMD_SET_RCVBUF        5
+#define CMD_SET_SNDBUF        6
+#define CMD_GET_RCVBUF        7
+#define CMD_GET_SNDBUF        8
+#define CMD_GET_SIZEOF        9
+
+
+#define CTL_OK     0
+#define CTL_INT    1
+#define CTL_PAIR   2
+#define CTL_BIN    3
+#define CTL_LIST   4
+#define CTL_ERR    255
+#define CTL_STRERR 254
+
+#define MIN_NL_BUFSIZE (32*1024)
+#define MAX_NL_BUFSIZE (512*1024)
+
+#define MAX_VSIZE 16
 
 ErlDrvTermData am_ok;
 ErlDrvTermData am_error;
@@ -220,7 +241,7 @@ static void emit_log(int level, char* file, int line, ...)
 }
 
 /* general control reply function */
-static ErlDrvSSizeT ctl_reply(int rep, char* buf, ErlDrvSizeT len,
+static ErlDrvSSizeT ctl_reply(int rep, void* buf, ErlDrvSizeT len,
 			      char** rbuf, ErlDrvSizeT rsize)
 {
     char* ptr;
@@ -245,7 +266,7 @@ static ErlDrvSSizeT ctl_reply(int rep, char* buf, ErlDrvSizeT len,
     return len+1;
 }
 
-struct nlmsghdr* nl_realloc_buffer(nl_ctx_t* ctx, size_t len)
+static void* nl_realloc_buffer(nl_ctx_t* ctx, size_t len)
 {
     if (ctx->nlbuf_len < len) {
 	ctx->nlbuf = driver_realloc(ctx->nlbuf, NLMSG_SPACE(len));
@@ -276,6 +297,8 @@ static void nl_drv_stop(ErlDrvData d)
     if (ctx) {
 	if (ctx->is_selecting)
 	    driver_select(ctx->port, ctx->fd, ERL_DRV_READ, 0);
+	if (ctx->is_sending)
+	    driver_select(ctx->port, ctx->fd, ERL_DRV_WRITE, 0);
 	driver_select(ctx->port, ctx->fd, ERL_DRV_USE, 0);
 	driver_free(ctx);
     }
@@ -284,38 +307,50 @@ static void nl_drv_stop(ErlDrvData d)
 static void nl_drv_output(ErlDrvData d, char* buf,ErlDrvSizeT len)
 {
     nl_ctx_t* ctx = (nl_ctx_t*) d;
-    struct sockaddr_nl dest_addr;
-    struct iovec iov;
-    struct msghdr msg;
-    struct nlmsghdr* nlh;
     int n;
+    struct nlmsghdr* nlh = (struct nlmsghdr*) buf;
 
+    if (!NLMSG_OK(nlh, len)) {
+	DEBUGF("netlink_drv: data not OK");
+    }
+    else {
+	DEBUGF("netlink_drv: output len=%d, type=%d, seq=%d, pid=%d",
+	       nlh->nlmsg_len, nlh->nlmsg_type, nlh->nlmsg_seq, nlh->nlmsg_pid);
+	if ((n = driver_sizeq(ctx->port)) > 0) {
+	    driver_enq(ctx->port, buf, len);
+	    DEBUGF("netlink_drv_output: put on queue pending=%d", n+len);
+	}
+	else  {  // try send directly
+	    struct sockaddr_nl dest_addr;
+	    struct iovec iov;
+	    struct msghdr msg;
 
-    memset(&dest_addr, 0, sizeof(dest_addr));
-    dest_addr.nl_family = AF_NETLINK;
-    dest_addr.nl_pid = 0;    // to kernel
-    dest_addr.nl_groups = 0; // unicast
+	    memset(&msg, 0, sizeof(msg));
+	    memset(&dest_addr, 0, sizeof(dest_addr));
 
-    nlh = nl_realloc_buffer(ctx, len);
-//    nlh->nlmsg_len = NLMSG_SPACE(len);
-//    nlh->nlmsg_pid = getpid();
-//    nlh->nlmsg_flags = 0;
-//    memcpy(NLMSG_DATA(nlh), buf, len);
-    memcpy((void*)nlh, buf, len);
-    iov.iov_base = (void*) nlh;
-    iov.iov_len  = nlh->nlmsg_len;
+	    dest_addr.nl_family = AF_NETLINK;
+	    dest_addr.nl_pid = 0;    // to kernel
+	    dest_addr.nl_groups = 0; // unicast
 
-    DEBUGF("netlink_drv: output len=%d, type=%d, seq=%d, pid=%d",
-	   nlh->nlmsg_len, nlh->nlmsg_type, nlh->nlmsg_seq, nlh->nlmsg_pid);
+	    iov.iov_base = (void*) buf;
+	    iov.iov_len  = len;
 
-    msg.msg_name = (void*) &dest_addr;
-    msg.msg_namelen = sizeof(dest_addr);
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
+	    msg.msg_name = (void*) &dest_addr;
+	    msg.msg_namelen = sizeof(dest_addr);
+	    msg.msg_iov = &iov;
+	    msg.msg_iovlen = 1;
     
-    n = sendmsg(INT_EVENT(ctx->fd), &msg, 0);
-    if (n < 0) {
-	ERRORF("write error=%s", strerror(errno));
+	    n = sendmsg(INT_EVENT(ctx->fd), &msg, 0);
+	    if (n < 0) {
+		ERRORF("write error=%s", strerror(errno));
+		if ((errno == EAGAIN) || (errno = ENOBUFS)) {
+		    DEBUGF("netlink_drv: put on queue", n);
+		    driver_enq(ctx->port, buf, len);
+		    driver_select(ctx->port, ctx->fd, ERL_DRV_WRITE, 1);
+		    ctx->is_sending = 1;
+		}
+	    }
+	}
     }
 }
 
@@ -330,12 +365,18 @@ static void nl_drv_ready_input(ErlDrvData d, ErlDrvEvent event)
     struct nlmsghdr* nlh;
     int n;
     int part = 0;
+    int recv_count = 10;
 
+    DEBUGF("nl_drv_ready_input");
+
+again:
+    if (!--recv_count)
+	return;
     memset(&iov, 0, sizeof(iov));
     memset(&msg, 0, sizeof(msg));
     memset(&src_addr, 0, sizeof(src_addr));
     
-    nlh = nl_realloc_buffer(ctx, 64*1024);
+    nlh = nl_realloc_buffer(ctx, MIN_NL_BUFSIZE);
 
     iov.iov_base = (void*) nlh;
     iov.iov_len  = ctx->nlbuf_len;
@@ -344,8 +385,16 @@ static void nl_drv_ready_input(ErlDrvData d, ErlDrvEvent event)
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
 
-    DEBUGF("nl_drv_read_input");
-    if ((n = recvmsg(INT_EVENT(ctx->fd), &msg, 0)) > 0) {
+    if ((n = recvmsg(INT_EVENT(ctx->fd), &msg, 0)) < 0) {
+	if (errno == EAGAIN)
+	    return;
+	// send error to erlang ?
+	WARNINGF("nl_drv_read_input: read error=%s", strerror(errno));
+    }
+    else if (n == 0) {
+	WARNINGF("nl_drv_read_input: read eof?");
+    }
+    else {
 	ErlDrvTermData message[16];
 
 	while(NLMSG_OK(nlh, n)) {
@@ -369,22 +418,59 @@ static void nl_drv_ready_input(ErlDrvData d, ErlDrvEvent event)
 	    }
 	    nlh = NLMSG_NEXT(nlh, n);
 	}
+	goto again;
     }
 }
 
 static void nl_drv_ready_output(ErlDrvData d, ErlDrvEvent event)
 {
-    (void) d;
-    (void) event;
-    DEBUGF("nl_drv_read_output called!!!");
+    nl_ctx_t* ctx = (nl_ctx_t*) d;
+    struct sockaddr_nl dest_addr;
+    int vsize;
+    SysIOVec* iovp;
+    struct msghdr msg;
+    int n;
+
+    DEBUGF("nl_drv_ready_output called");
+
+    if (ctx->fd != event) {
+	DEBUGF("nl_drv_ready_output bad event");
+	return;
+    }
+
+    if ((iovp = driver_peekq(ctx->port, &vsize)) == NULL) {
+	driver_select(ctx->port, ctx->fd, ERL_DRV_WRITE, 0);
+	ctx->is_sending = 0;
+	return;
+    }
+    vsize = vsize > MAX_VSIZE ? MAX_VSIZE : vsize;
+
+    memset(&msg, 0, sizeof(msg));
+    memset(&dest_addr, 0, sizeof(dest_addr));
+
+    dest_addr.nl_family = AF_NETLINK;
+    dest_addr.nl_pid = 0;    // to kernel
+    dest_addr.nl_groups = 0; // unicast    
+
+    msg.msg_name = (void*) &dest_addr;
+    msg.msg_namelen = sizeof(dest_addr);
+    msg.msg_iov = (struct iovec*) iovp;
+    msg.msg_iovlen = vsize;
+
+    DEBUGF("nl_drv_ready_output: try send vsize=%d", vsize);    
+    n = sendmsg(INT_EVENT(ctx->fd), &msg, 0);
+    if (n < 0) {
+	if ((errno == EAGAIN) || (errno == ENOBUFS))
+	    return;
+	ERRORF("write error=%s", strerror(errno));
+	return;
+    }
+    DEBUGF("nl_drv_ready_output: sent %d bytes", n);
+    if (driver_deq(ctx->port, n) == 0) {
+	driver_select(ctx->port, ctx->fd, ERL_DRV_WRITE, 0);
+	ctx->is_sending = 0;
+    }
 }
-
-#define NL_CMD_CONNECT     1
-#define NL_CMD_DISCONNECT  2
-#define NL_CMD_ACTIVE      3
-
-#define NL_REP_OK     0
-#define NL_REP_ERROR  1
 
 static ErlDrvSSizeT nl_drv_ctl(ErlDrvData d,unsigned int cmd,char* buf0,
 			       ErlDrvSizeT len,char** rbuf,ErlDrvSizeT rsize)
@@ -417,6 +503,78 @@ static ErlDrvSSizeT nl_drv_ctl(ErlDrvData d,unsigned int cmd,char* buf0,
 		       (void*) &opt, sizeof(opt)) < 0)
 	    goto error;
 	goto ok;
+    }
+
+    case CMD_SET_RCVBUF: {
+	int opt;
+	if (len != 4)
+	    goto badarg;
+	opt = get_int32(buf);
+	if (setsockopt(INT_EVENT(ctx->fd), SOL_SOCKET,
+		       SO_RCVBUF,
+		       (void*) &opt, sizeof(opt)) < 0)
+	    goto error;
+	if (opt > 0) {
+	    // make sure i/o buffer match
+	    nl_realloc_buffer(ctx, (size_t)opt);
+	}
+	goto ok;
+    }
+
+    case CMD_SET_SNDBUF: {
+	int opt;
+	if (len != 4)
+	    goto badarg;
+	opt = get_int32(buf);
+	if (setsockopt(INT_EVENT(ctx->fd), SOL_SOCKET,
+		       SO_SNDBUF,
+		       (void*) &opt, sizeof(opt)) < 0)
+	    goto error;
+	if (opt > 0) {
+	    // make sure i/o buffer match
+	    nl_realloc_buffer(ctx, (size_t)opt);
+	}
+	goto ok;
+    }
+
+    case CMD_GET_RCVBUF: {
+	int opt;
+	socklen_t optlen;
+	if (len != 0)
+	    goto badarg;
+	optlen = sizeof(opt);
+	opt = get_int32(buf);
+	if (getsockopt(INT_EVENT(ctx->fd), SOL_SOCKET,
+		       SO_RCVBUF,
+		       (void*) &opt, &optlen) < 0)
+	    goto error;
+	return ctl_reply(CTL_INT, &opt, sizeof(opt), rbuf, rsize);
+    }
+
+    case CMD_GET_SNDBUF: {
+	int opt;
+	socklen_t optlen;
+	if (len != 0)
+	    goto badarg;
+	optlen = sizeof(opt);
+	opt = get_int32(buf);
+	if (getsockopt(INT_EVENT(ctx->fd), SOL_SOCKET,
+		       SO_SNDBUF,
+		       (void*) &opt, &optlen) < 0)
+	    goto error;
+	return ctl_reply(CTL_INT, &opt, sizeof(opt), rbuf, rsize);
+    }
+
+    case CMD_GET_SIZEOF: {
+	uint8_t sizes[6];
+	
+	sizes[0] = (uint8_t) sizeof(char);
+	sizes[1] = (uint8_t) sizeof(short);
+	sizes[2] = (uint8_t) sizeof(int);
+	sizes[3] = (uint8_t) sizeof(long);
+	sizes[4] = (uint8_t) sizeof(long long);
+	sizes[5] = (uint8_t) sizeof(void*);
+	return ctl_reply(CTL_LIST, sizes, 6, rbuf, rsize);
     }
 
     case CMD_ACTIVE: {
@@ -452,12 +610,12 @@ static ErlDrvSSizeT nl_drv_ctl(ErlDrvData d,unsigned int cmd,char* buf0,
     }
 
 ok:
-    return ctl_reply(0, NULL, 0, rbuf, rsize);
+    return ctl_reply(CTL_OK, NULL, 0, rbuf, rsize);
 badarg:
     errno = EINVAL;
 error: {
     char* err_str = erl_errno_id(errno);
-    return ctl_reply(255, err_str, strlen(err_str), rbuf, rsize);
+    return ctl_reply(CTL_ERR, err_str, strlen(err_str), rbuf, rsize);
 }
 }
 
@@ -503,7 +661,7 @@ static ErlDrvData nl_drv_start(ErlDrvPort port, char* command)
 
     memset(&addr, 0, sizeof(addr));
     addr.nl_family = AF_NETLINK;
-    addr.nl_groups  = -1;
+    addr.nl_groups  = 0;         // start with no groups
     addr.nl_pid     = getpid();  // bind using this pid?
 
     if (bind(fd, (struct sockaddr* ) &addr, sizeof(addr))  < 0)
@@ -514,13 +672,14 @@ static ErlDrvData nl_drv_start(ErlDrvPort port, char* command)
 
     if (!(ctx = driver_alloc(sizeof(nl_ctx_t))))
 	return ERL_DRV_ERROR_ERRNO;
-
     memset(ctx, 0, sizeof(nl_ctx_t));
     ctx->port = port;
     ctx->dport = driver_mk_port(port);
     ctx->owner = driver_caller(port);
     ctx->protocol = protocol;
     ctx->fd       = (ErlDrvEvent)((long)fd);
+
+    nl_realloc_buffer(ctx, MIN_NL_BUFSIZE);  // create i/o buffer
 
 #ifdef PORT_CONTROL_BINARY
     set_port_control_flags(port, PORT_CONTROL_FLAG_BINARY);

@@ -12,6 +12,36 @@
 -define(INFILE, "netlink.inc").
 -define(ERL_MOD, "netl_codec").
 
+-define(INT_SIZE_32,  true).
+-define(LONG_SIZE_32, true).
+
+-ifdef(INT_SIZE_32).
+-define(int_t,  int32_t).
+-define(uint_t, uint32_t).
+-else.
+-ifdef(INT_SIZE_64).
+-define(int_t,  int64_t).
+-define(uint_t, uint64_t).
+-endif.
+-endif.
+
+-ifdef(LONG_SIZE_32).
+-define(long_t,  int32_t).
+-define(ulong_t, uint32_t).
+-else.
+-ifdef(LONG_SIZE_64).
+-define(long_t,  int64_t).
+-define(ulong_t, uint64_t).
+-endif.
+-endif.
+
+-define(short_t,  int16_t).
+-define(ushort_t, uint16_t).
+
+-define(char_t,  int8_t).
+-define(uchar_t, uint8_t).
+
+
 -record(gen,
 	{
 	  error = 0 :: integer(), %% number of errors detected
@@ -433,25 +463,42 @@ is_integer_type(T) ->
 
 is_unsigned_type(T) ->
     case T of
-	uint8_t -> true;
-	uint16_t -> true;
-	uint32_t -> true;
-	uint64_t -> true;
+	ulong_t   -> true;
+	ushort_t  -> true;
+	uchar_t   -> true;
+	uint_t    -> true;
+	uint8_t   -> true;
+	uint16_t  -> true;
+	uint32_t  -> true;
+	uint64_t  -> true;
 	_  -> false
     end.
 
 is_signed_type(T) ->
     case T of
-	int8_t -> true;
-	int16_t -> true;
-	int32_t -> true;
-	int64_t -> true;
+	long_t   -> true;
+	int_t    -> true;
+	short_t  -> true;
+	char_t   -> true;
+	int8_t   -> true;
+	int16_t  -> true;
+	int32_t  -> true;
+	int64_t  -> true;
 	_  -> false
     end.
 %%
 %% generate match code 
 %% {BitMatch, TermCode}
 %% 
+match_code(int_t, E, X, G) -> match_code(?int_t, E, X, G);
+match_code(uint_t, E, X, G) -> match_code(?uint_t, E, X, G);
+match_code(long_t, E, X, G) -> match_code(?long_t, E, X, G);
+match_code(ulong_t, E, X, G) -> match_code(?ulong_t, E, X, G);
+match_code(short_t, E, X, G) -> match_code(?short_t, E, X, G);
+match_code(ushort_t, E, X, G) -> match_code(?ushort_t, E, X, G);
+match_code(char_t, E, X, G) -> match_code(?char_t, E, X, G);
+match_code(uchar_t, E, X, G) -> match_code(?uchar_t, E, X, G);
+
 match_code(uint64_t,native,X,_G) -> match_int_code(X,64,unsigned,native);
 match_code(uint32_t,native,X,_G) -> match_int_code(X,32,unsigned,native);
 match_code(uint16_t,native,X,_G) -> match_int_code(X,16,unsigned,native);
@@ -566,6 +613,14 @@ match_int_code(X,Size,Sign,Endian) ->
 %% generate  generate-code
 %% return {Encode, BitConstruct}
 %%
+gen_code(int_t, E, X, G) -> gen_code(?int_t, E, X, G);
+gen_code(uint_t, E, X, G) -> gen_code(?uint_t, E, X, G);
+gen_code(long_t, E, X, G) -> gen_code(?long_t, E, X, G);
+gen_code(ulong_t, E, X, G) -> gen_code(?ulong_t, E, X, G);
+gen_code(short_t, E, X, G) -> gen_code(?short_t, E, X, G);
+gen_code(ushort_t, E, X, G) -> gen_code(?ushort_t, E, X, G);
+gen_code(char_t, E, X, G) -> gen_code(?char_t, E, X, G);
+gen_code(uchar_t, E, X, G) -> gen_code(?uchar_t, E, X, G);
 
 gen_code(uint64_t,native,X,_G) -> gen_int_code(X,64,unsigned,native);
 gen_code(uint32_t,native,X,_G) -> gen_int_code(X,32,unsigned,native);

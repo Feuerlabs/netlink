@@ -14,10 +14,15 @@
 %%% Created : 30 Nov 2011 by Tony Rogvall <tony@rogvall.se>
 
 -module(netlink_drv).
--export([open/1, close/1]).
--export([send/2]).
--export([add_membership/2, drop_membership/2,
-	 deactivate/1, activate/1, activate/2,
+-export([open/1, close/1, send/2]).
+-export([add_membership/2, 
+	 drop_membership/2,
+	 set_rcvbuf/2, set_sndbuf/2,
+	 get_rcvbuf/1, get_sndbuf/1,
+	 get_sizeof/1,
+	 deactivate/1,
+	 activate/1, 
+	 activate/2,
 	 debug/2]).
 
 %% deugging
@@ -29,6 +34,11 @@
 -define(CMD_DROP_MEMBERSHIP,  2).
 -define(CMD_ACTIVE,           3).
 -define(CMD_DEBUG,            4).
+-define(CMD_SET_RCVBUF,       5).
+-define(CMD_SET_SNDBUF,       6).
+-define(CMD_GET_RCVBUF,       7).
+-define(CMD_GET_SNDBUF,       8).
+-define(CMD_GET_SIZEOF,       9).
 
 -define(DLOG_DEBUG,     7).
 -define(DLOG_INFO,      6).
@@ -40,12 +50,26 @@
 -define(DLOG_EMERGENCY, 0).
 -define(DLOG_NONE,     -1).
 
-
 add_membership(Port,Msg) when is_integer(Msg) ->
     port_call(Port, ?CMD_ADD_MEMBERSHIP, <<Msg:32>>).
 
 drop_membership(Port,Msg) when is_integer(Msg) ->
     port_call(Port, ?CMD_DROP_MEMBERSHIP, <<Msg:32>>).
+
+set_rcvbuf(Port,Size) when is_integer(Size), Size >= 0 ->
+    port_call(Port, ?CMD_SET_RCVBUF, <<Size:32>>).
+
+set_sndbuf(Port,Size) when is_integer(Size), Size >= 0 ->
+    port_call(Port, ?CMD_SET_SNDBUF, <<Size:32>>).
+
+get_rcvbuf(Port) ->
+    port_call(Port, ?CMD_GET_RCVBUF, <<>>).
+
+get_sndbuf(Port) ->
+    port_call(Port, ?CMD_GET_SNDBUF, <<>>).
+
+get_sizeof(Port) ->
+    port_call(Port, ?CMD_GET_SIZEOF, <<>>).
 
 deactivate(Port) ->
     activate(Port, 0).    
@@ -59,7 +83,6 @@ activate(Port, N) when is_integer(N), N >= -1, N < 16#7fffffff ->
 debug(Port,Level) when is_atom(Level) ->
     L = level(Level),
     port_call(Port, ?CMD_DEBUG, <<L:32>>).
-
 
 open(Protocol) when is_integer(Protocol), Protocol >= 0 ->
     Driver = "netlink_drv",
@@ -88,14 +111,18 @@ port_call(Port, Cmd, Data) ->
 	    {error, erlang:binary_to_atom(E, latin1)};
 	<<254,E/binary>> -> 
 	    {error, binary_to_list(E)};
-	<<1,Y>> -> {ok,Y};
-	<<2,Y:16/native-unsigned>> -> {ok, Y};
-	<<4,Y:32/native-unsigned>> -> {ok, Y};
-	<<8,A:32/native-unsigned,B:32/native-unsigned>> -> {ok,A,B};
-	<<3,Return/binary>> -> {ok,Return}
-    end.    
+	<<1,Y:8>> -> {ok,Y};
+	<<1,Y:16/native-unsigned>> -> {ok, Y};
+	<<1,Y:32/native-unsigned>> -> {ok, Y};
+	<<1,Y:64/native-unsigned>> -> {ok, Y};
+	<<2,X:32/native-unsigned,Y:32/native-unsigned>> -> {ok,{X,Y}};
+	<<3,X/binary>> -> {ok,X};
+	<<4,X/binary>> -> {ok,binary_to_list(X)}
+    end.
 	
 %% convert symbolic to numeric level
+level(true)  -> ?DLOG_DEBUG;
+level(false) -> ?DLOG_NONE;
 level(debug) -> ?DLOG_DEBUG;
 level(info)  -> ?DLOG_INFO;
 level(notice) -> ?DLOG_NOTICE;
