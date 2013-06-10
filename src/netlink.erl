@@ -188,6 +188,18 @@ start_link(Opts) ->
 init([Opts]) ->
     OsPid = list_to_integer(os:getpid()),
     I_Seq = O_Seq = 1234, %% element(2,now()),
+    State = #state{ ospid = OsPid, 
+		    o_seq = O_Seq, 
+		    i_seq = I_Seq },
+
+    case os:type() of
+	{unix, linux} ->
+	    init_drv(Opts, State);
+	_ ->
+	    {ok, State}
+    end.
+
+init_drv(Opts, State) ->
     Port = netlink_drv:open(?NETLINK_ROUTE),
 
     netlink_drv:debug(Port, proplists:get_value(debug,Opts,none)),
@@ -227,13 +239,10 @@ init([Opts]) ->
 			    []},
 		    from = {self(),make_ref()}
 		  },
-    {ok, #state{ port=Port,
-		 ospid = OsPid, 
-		 o_seq = O_Seq, 
-		 i_seq = I_Seq,
-		 request = R0,
-		 request_queue = [R1,R2,R3]
-	       }}.
+    {ok, State#state{ port=Port,
+		      request = R0,
+		      request_queue = [R1,R2,R3]
+		    }}.
 
 %%--------------------------------------------------------------------
 %% @private
