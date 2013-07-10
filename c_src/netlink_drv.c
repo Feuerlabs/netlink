@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <string.h>
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
