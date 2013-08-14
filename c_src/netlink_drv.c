@@ -33,6 +33,12 @@ typedef int  ErlDrvSizeT;
 typedef int  ErlDrvSSizeT;
 #endif
 
+#if (ERL_DRV_EXTENDED_MAJOR_VERSION > 2) || ((ERL_DRV_EXTENDED_MAJOR_VERSION == 2) && (ERL_DRV_EXTENDED_MINOR_VERSION >= 1))
+#define SEND_TERM(ctx, to, message, len) erl_drv_send_term((ctx)->dport,(to),(message),(len))
+#else
+#define SEND_TERM(ctx, to, message, len) driver_send_term((ctx)->port,(to),(message),(len))
+#endif
+
 #ifndef SOL_NETLINK
 #define SOL_NETLINK 270
 #endif
@@ -407,7 +413,7 @@ again:
 	    DEBUGF("nl_drv_read_input: part = %d", part);
 	    part++;
 	    if (ctx->active) {
-		driver_send_term(ctx->port, ctx->owner, message, i);
+		SEND_TERM(ctx, ctx->owner, message, i);
 		if (ctx->active > 0) {
 		    ctx->active--;
 		    if (ctx->active == 0) {
