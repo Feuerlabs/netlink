@@ -20,7 +20,7 @@
 
 %% API
 -export([start_link/0, start_link/1]).
--export([start/0, start/1, stop/0]).
+-export([start/0, stop/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -28,6 +28,7 @@
 -export([i/0, list/1]).
 -export([subscribe/1, subscribe/2, subscribe/3]).
 -export([unsubscribe/1]).
+-export([invalidate/2]).
 -export([get_root/2, get_match/3, get/4]).
 
 -include_lib("lager/include/log.hrl").
@@ -110,11 +111,8 @@
 %%% API
 %%%===================================================================
 
-%% debug & test
 start() ->
-    start([]).
-start(Opts) ->
-    gen_server:start({local, ?SERVER}, ?MODULE, [Opts], []).
+    application:start(netlink).
 
 i() ->
     gen_server:call(?SERVER, {list,[]}).
@@ -149,6 +147,10 @@ subscribe(Name,Fields,Options) ->
 
 unsubscribe(Ref) ->
     gen_server:call(?SERVER, {unsubscribe,Ref}).
+
+%% clear all attributes for interface Name
+invalidate(Name,Fields) ->
+    gen_server:call(?SERVER, {invalidate,Name,Fields}).
 
 get_root(What,Fam) ->
     get(What,Fam,[root,match,request],[]).
@@ -303,6 +305,18 @@ handle_call({unsubscribe,Ref}, _From, State) ->
 	    erlang:demonitor(Ref),
 	    {reply,ok,State#state { sub_list=SubList }}
     end;
+handle_call({invalidate,Name,Fields},_From,State) ->
+    case lists:keytake(Name, #link.name, State#state.link_list) of 
+	false -> {reply, {error,enoent}, State};
+	{value,L,Ls} ->
+	    Attr = lists:foldl(
+		     fun(F,D) when is_atom(F) ->
+			     dict:erase(F, D)
+		     end, L#link.attr, Fields),
+	    L1 = L#link { attr = Attr },
+	    {reply, ok, State#state { link_list = [L1|Ls] } }
+    end;
+
 handle_call(Req={get,_What,_Fam,_Flags,_Attrs}, From, State) ->
     ?debug("handle_call: GET: ~p", [Req]),
     State1 = enq_request(Req, From, State),
