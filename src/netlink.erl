@@ -31,7 +31,7 @@
 -export([invalidate/2]).
 -export([get_root/2, get_match/3, get/4]).
 
--include_lib("lager/include/log.hrl").
+-include("log.hrl").
 -include("netlink.hrl").
 -include("netl_codec.hrl").
 
