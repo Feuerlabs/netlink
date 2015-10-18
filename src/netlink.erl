@@ -61,7 +61,7 @@
 	{
 	  name     :: if_name(),          %% interface name
 	  index    :: non_neg_integer(),  %% interface index
-	  attr     :: dict()              %% attributes {atom(),term}
+	  attr     :: term()              %% attributes {atom(),term}
 	}).
 
 -record(addr,
@@ -69,7 +69,7 @@
 	  addr     :: if_addr(),          %% the address
 	  name     :: if_name(),          %% interface label
 	  index    :: non_neg_integer(),  %% interface index
-	  attr     :: dict()              %% attributes
+	  attr     :: term()              %% attributes
 	}).
 
 -record(subscription,

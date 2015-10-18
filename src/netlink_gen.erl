@@ -45,10 +45,10 @@
 -record(gen,
 	{
 	  error = 0 :: integer(), %% number of errors detected
-	  defs      :: dict(),    %% Symbol -> Value
-	  enums     :: dict(),    %% Name->[{atom(),integer()}]}
-	  attrs     :: dict(),    %% Name->[{atom(),integer(),type()}]
-	  recs      :: dict()     %% Name->[{atom(),integer(),type()}]
+	  defs      :: term(),    %% Symbol -> Value
+	  enums     :: term(),    %% Name->[{atom(),integer()}]}
+	  attrs     :: term(),    %% Name->[{atom(),integer(),type()}]
+	  recs      :: term()     %% Name->[{atom(),integer(),type()}]
 	}).
 
 start() ->
