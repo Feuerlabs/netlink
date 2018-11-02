@@ -368,9 +368,9 @@ handle_info(_Info={nl_data,Port,Data},State) when Port =:= State#state.port ->
 		  end, State, MsgList),
 	    {noreply, State1}
     catch
-	error:_ ->
+	?EXCEPTION(error, _Reason, Stacktrace) ->
 	    ?log(error, "netlink: handle_info: Crash: ~p", 
-		   [erlang:get_stacktrace()]),
+		   [?GET_STACK(Stacktrace)]),
 	    {noreply, State}
     end;
 
