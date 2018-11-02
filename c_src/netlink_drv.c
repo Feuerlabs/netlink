@@ -54,7 +54,7 @@ typedef struct _nl_ctx_t {
     ErlDrvTermData   owner;
     ErlDrvEvent      fd;       // netlink socket
     int              protocol;  // netlink protocol
-    int              active;    
+    int              active;
     int              is_selecting;
     int              is_sending;
     void*            nlbuf;
@@ -346,7 +346,7 @@ static void nl_drv_output(ErlDrvData d, char* buf,ErlDrvSizeT len)
 	    msg.msg_namelen = sizeof(dest_addr);
 	    msg.msg_iov = &iov;
 	    msg.msg_iovlen = 1;
-    
+
 	    n = sendmsg(INT_EVENT(ctx->fd), &msg, 0);
 	    if (n < 0) {
 		ERRORF("write error=%s", strerror(errno));
@@ -382,7 +382,7 @@ again:
     memset(&iov, 0, sizeof(iov));
     memset(&msg, 0, sizeof(msg));
     memset(&src_addr, 0, sizeof(src_addr));
-    
+
     nlh = nl_realloc_buffer(ctx, MIN_NL_BUFSIZE);
 
     iov.iov_base = (void*) nlh;
@@ -457,14 +457,14 @@ static void nl_drv_ready_output(ErlDrvData d, ErlDrvEvent event)
 
     dest_addr.nl_family = AF_NETLINK;
     dest_addr.nl_pid = 0;    // to kernel
-    dest_addr.nl_groups = 0; // unicast    
+    dest_addr.nl_groups = 0; // unicast
 
     msg.msg_name = (void*) &dest_addr;
     msg.msg_namelen = sizeof(dest_addr);
     msg.msg_iov = (struct iovec*) iovp;
     msg.msg_iovlen = vsize;
 
-    DEBUGF("nl_drv_ready_output: try send vsize=%d", vsize);    
+    DEBUGF("nl_drv_ready_output: try send vsize=%d", vsize);
     n = sendmsg(INT_EVENT(ctx->fd), &msg, 0);
     if (n < 0) {
 	if ((errno == EAGAIN) || (errno == ENOBUFS))
@@ -715,7 +715,6 @@ DRIVER_INIT(nl_drv)
     ptr->ready_async = 0;
     ptr->flush = 0;
     ptr->call = 0;
-    ptr->event = 0;
     ptr->extended_marker = ERL_DRV_EXTENDED_MARKER;
     ptr->major_version = ERL_DRV_EXTENDED_MAJOR_VERSION;
     ptr->minor_version = ERL_DRV_EXTENDED_MINOR_VERSION;

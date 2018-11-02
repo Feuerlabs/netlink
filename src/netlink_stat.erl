@@ -91,10 +91,23 @@ get_statistics(Interface) ->
     netlink:unsubscribe(Ref),
     case Res of
 	{ok,Stats} ->
-	    #rtnl_link_stats{} = R =list_to_tuple([rtnl_link_stats | Stats]),
-	    {ok,R};
+	    {ok,set_stats(Stats)};
 	Error ->
 	    Error
+    end.
+
+%% fix to handle padded/aligned data?
+set_stats(Stats) ->
+    Len = length(Stats),
+    N = tuple_size(#rtnl_link_stats{})-1,
+    if Len > N ->
+	    {Fields,_} = lists:split(N, Stats),
+	    list_to_tuple([rtnl_link_stats | Fields]);
+       Len =:= N ->
+	    list_to_tuple([rtnl_link_stats | Stats]);
+       true ->
+	    Pad = lists:duplicate(N - Len, 0),
+	    list_to_tuple([rtnl_link_stats | (Stats++Pad)])
     end.
 
 get_stats64(Ref,Timeout) ->
