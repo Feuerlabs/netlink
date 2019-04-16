@@ -95,7 +95,7 @@
 	  seq=0     %% sequence to expect in reply
 	}).
 
--record(state, 
+-record(state,
 	{
 	  port,
 	  link_list  = [] :: [#link {}],
@@ -192,8 +192,8 @@ start_link(Opts) ->
 init([Opts]) ->
     OsPid = list_to_integer(os:getpid()),
     I_Seq = O_Seq = 1234, %% element(2,now()),
-    State = #state{ ospid = OsPid, 
-		    o_seq = O_Seq, 
+    State = #state{ ospid = OsPid,
+		    o_seq = O_Seq,
 		    i_seq = I_Seq },
 
     case os:type() of
@@ -223,9 +223,9 @@ init_drv(Opts, State) ->
     netlink_drv:activate(Port),
     %% init sequence to fill the cache
     T0 = erlang:start_timer(200, self(), request_timeout),
-    R0 = #request { tmr  = T0, 
-		    call = noop, 
-		    from = {self(),make_ref()} 
+    R0 = #request { tmr  = T0,
+		    call = noop,
+		    from = {self(),make_ref()}
 		  },
     R1 = #request { tmr  = {relative, ?REQUEST_TMO},
 		    call = {get,link,unspec,
@@ -233,7 +233,7 @@ init_drv(Opts, State) ->
 			    []},
 		    from = {self(),make_ref()}
 		  },
-    R2 = #request { tmr  = {relative, 1000}, 
+    R2 = #request { tmr  = {relative, 1000},
 		    call = noop,
 		    from = {self(),make_ref()}
 		  },
@@ -266,7 +266,7 @@ handle_call({list,Match}, _From, State) ->
     lists:foreach(
       fun(L) ->
 	      %% select addresses that belong to link L
-	      Ys = [Y || Y <- State#state.addr_list, 
+	      Ys = [Y || Y <- State#state.addr_list,
 			 Y#addr.index =:= L#link.index],
 	      FYs = [format_addr(Y) || Y <- Ys ],
 	      case match(L#link.attr,dict:new(),Match) of
@@ -307,7 +307,7 @@ handle_call({unsubscribe,Ref}, _From, State) ->
 	    {reply,ok,State#state { sub_list=SubList }}
     end;
 handle_call({invalidate,Name,Fields},_From,State) ->
-    case lists:keytake(Name, #link.name, State#state.link_list) of 
+    case lists:keytake(Name, #link.name, State#state.link_list) of
 	false -> {reply, {error,enoent}, State};
 	{value,L,Ls} ->
 	    Attr = lists:foldl(
@@ -358,7 +358,7 @@ handle_info(_Info={nl_data,Port,Data},State) when Port =:= State#state.port ->
 	MsgList ->
 	    %% FIXME: the messages should be delivered one by one from
 	    %% the driver so the decoding could simplified.
-	    State1 = 
+	    State1 =
 		lists:foldl(
 		  fun(Msg,StateI) ->
 			  ?log(debug, "handle_info: msg=~p", [Msg]),
@@ -369,7 +369,7 @@ handle_info(_Info={nl_data,Port,Data},State) when Port =:= State#state.port ->
 	    {noreply, State1}
     catch
 	?EXCEPTION(error, _Reason, Stacktrace) ->
-	    ?log(error, "netlink: handle_info: Crash: ~p", 
+	    ?log(error, "netlink: handle_info: Crash: ~p",
 		   [?GET_STACK(Stacktrace)]),
 	    {noreply, State}
     end;
@@ -440,13 +440,13 @@ code_change(_OldVsn, State, _Extra) ->
 
 enq_request(Call, From, State) ->
     Tmr = erlang:start_timer(?REQUEST_TMO, self(), request_timeout),
-    R = #request { tmr  = Tmr, 
+    R = #request { tmr  = Tmr,
 		   call = Call,
 		   from = From
 		 },
     Q = State#state.request_queue ++ [R],
     State#state { request_queue = Q }.
-    
+
 dispatch_command(State) when State#state.request =:= undefined ->
     case State#state.request_queue of
 	[R=#request { call = {get,What,Fam,Flags,Attrs} } | Q ] ->
@@ -465,7 +465,7 @@ dispatch_command(State) when State#state.request =:= undefined ->
 dispatch_command(State) ->
     State.
 
-update_timer(R = #request { tmr = {relative,Tmo} }) 
+update_timer(R = #request { tmr = {relative,Tmo} })
   when is_integer(Tmo), Tmo >= 0 ->
     Tmr = erlang:start_timer(Tmo, self(), request_timeout),
     R#request { tmr = Tmr };
@@ -510,7 +510,7 @@ get_command(addr,Fam,Flags,Attrs,State) ->
 		     index=0,attributes=Attrs},
     Hdr = #nlmsghdr { type=getaddr,
 		      flags=Flags,
-		      seq=Seq, 
+		      seq=Seq,
 		      pid=State#state.ospid },
     Request = netlink_codec:encode(Hdr,Get),
     netlink_drv:send(State#state.port, Request),
@@ -580,7 +580,7 @@ handle_nlmsg(RTM=#deladdr { family=_Fam, index=_Index, attributes=As },
     Name = proplists:get_value(label, As, ""),
     case lists:keytake(Addr, #addr.addr, State#state.addr_list) of
 	false ->
-	    ?log(warning, "Warning addr=~s not found", [Addr]),
+	    ?log(warning, "Warning addr=~w not found", [Addr]),
 	    State;
 	{value,Y,Ys} ->
 	    As1 = dict:to_list(Y#addr.attr),
@@ -630,7 +630,7 @@ update_attrs(Name,Type,As,To,Subs) ->
     lists:foldl(
       fun({K,Vnew},D) ->
 	      case dict:find(K,D) of
-		  error -> 
+		  error ->
 		      send_event(Name,Type,K,undefined,Vnew,Subs),
 		      dict:store(K,Vnew,D);
 		  {ok,Vnew} -> D;  %% already exist
@@ -641,10 +641,10 @@ update_attrs(Name,Type,As,To,Subs) ->
       end, To, As).
 
 
-send_event(Name,Type,Field,Old,New,[S|SList]) when 
+send_event(Name,Type,Field,Old,New,[S|SList]) when
       S#subscription.name =:= Name; S#subscription.name =:= "" ->
     case S#subscription.fields =:= all orelse
-	S#subscription.fields =:= Type orelse 
+	S#subscription.fields =:= Type orelse
 	lists:member(Field,S#subscription.fields) orelse
 	lists:member({Type,Field},S#subscription.fields) of
 	true ->
@@ -658,7 +658,7 @@ send_event(Name,Type,Field,Old,New,[_|SList]) ->
     send_event(Name,Type,Field,Old,New,SList);
 send_event(_Name,_Type,_Field,_Old,_New,[]) ->
     ok.
-	    
+
 
 match(Y,L,[{Field,Value}|Match]) when is_atom(Field) ->
     case find2(Field,Y,L) of
