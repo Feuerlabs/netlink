@@ -13,6 +13,6 @@ This is a [Netlink][wikipedia] socket implementation in Erlang.
 [hex]: https://hex.pm/packages/netlink
 [hex version badge]: https://img.shields.io/hexpm/v/netlink.svg?style=flat-square
 [hex license badge]: https://img.shields.io/hexpm/l/netlink.svg?style=flat-square
-[erlang version badge]: https://img.shields.io/badge/erlang-18--21-blue.svg?style=flat-square
+[erlang version badge]: https://img.shields.io/badge/erlang-18--22-blue.svg?style=flat-square
 [build tool]: https://img.shields.io/badge/build%20tool-rebar3-orange.svg?style=flat-square
 [wikipedia]: https://en.wikipedia.org/wiki/Netlink
